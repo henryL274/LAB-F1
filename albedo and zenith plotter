@@ -1,0 +1,117 @@
+import numpy as np
+import matplotlib.pyplot as plt
+
+angle_time = [36,29,26,23,19,15,10,7,4,0]
+angles=[0,10,20,30,40,50,60,70,80,90]
+def data_extractor(angle):
+    return np.loadtxt(f"C:/Users/henry/Documents/LAB 1 F1/15jandata/{angle}DEGREES.csv",delimiter =",",skiprows=1)
+data=[]
+for i in range(len(angles)):
+    data.append(data_extractor(angles[i]))
+
+for i in range(len(data)):
+    data[i].T[0] += angle_time[i] * 60
+
+for i in data:
+    plt.plot(i.T[0],i.T[1])
+
+meani=[]
+meant=[]
+for i in data:
+    meant.append(np.mean(i.T[0]))
+    meani.append(np.mean(i.T[1]))
+
+plt.plot(meant,meani)
+
+plt.show()
+
+data2 = np.loadtxt("C:/Users/henry/Documents/LAB 1 F1/15jandata/92HUMIDITY.csv",skiprows=1,delimiter=",")
+plt.plot(data2.T[0],data2.T[1])
+plt.show()
+
+data_together = np.concatenate(data)
+
+#%%
+
+import pandas as pd
+
+# Function to remove outliers using IQR
+def remove_outliers(data, column):
+    Q1 = data[column].quantile(0.25)  # First quartile (25th percentile)
+    Q3 = data[column].quantile(0.75)  # Third quartile (75th percentile)
+    IQR = Q3 - Q1                     # Interquartile range
+    lower_bound = Q1 - 1.5 * IQR      # Lower bound
+    upper_bound = Q3 + 1.5 * IQR      # Upper bound
+    # Filter data within bounds
+    filtered_data = data[(data[column] >= lower_bound) & (data[column] <= upper_bound)]
+    return filtered_data
+
+# File paths for the CSVs
+downward_facing_csv = 'downward_facing_sensor.csv'  # Replace with the actual file path
+upward_facing_csv = 'upward_facing_sensor.csv'      # Replace with the actual file path
+
+# Load the CSVs into pandas DataFrames
+downward_df = pd.read_csv(downward_facing_csv)
+upward_df = pd.read_csv(upward_facing_csv)
+
+# Remove outliers
+downward_df_clean = remove_outliers(downward_df, 'intensity')  # Replace 'intensity' if needed
+upward_df_clean = remove_outliers(upward_df, 'intensity')      # Replace 'intensity' if needed
+
+# Calculate average intensity after removing outliers
+downward_average = downward_df_clean['intensity'].mean()
+upward_average = upward_df_clean['intensity'].mean()
+
+# Calculate Albedo
+albedo = (downward_average / upward_average) * 100  # Convert to percentage
+
+# Output the results
+print(f"Average downward-facing light intensity (after outlier removal): {downward_average:.2f}")
+print(f"Average upward-facing light intensity (after outlier removal): {upward_average:.2f}")
+print(f"Albedo: {albedo:.2f}%")
+
+
+#%%
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Load the CSV file
+sky_csv = 'sky_light_intensity.csv' 
+sky_df = pd.read_csv(sky_csv)
+
+# Add a column for the detector angle (assuming time is in seconds)
+sky_df['angle'] = 90 - sky_df['time']  # Replace 'time' with the actual time column name
+
+# Remove outliers using IQR (optional, similar to earlier script)
+def remove_outliers(data, column):
+    Q1 = data[column].quantile(0.25)
+    Q3 = data[column].quantile(0.75)
+    IQR = Q3 - Q1
+    lower_bound = Q1 - 1.5 * IQR
+    upper_bound = Q3 + 1.5 * IQR
+    return data[(data[column] >= lower_bound) & (data[column] <= upper_bound)]
+
+sky_df_clean = remove_outliers(sky_df, 'intensity')  # Replace 'intensity' with actual column name
+
+# Sort data by angle (for easier plotting)
+sky_df_clean = sky_df_clean.sort_values(by='angle')
+
+# Plot light intensity vs. angle
+plt.figure(figsize=(10, 6))
+plt.plot(sky_df_clean['angle'], sky_df_clean['intensity'], label='Light Intensity')
+plt.xlabel('Detector Angle (degrees)')
+plt.ylabel('Light Intensity')
+plt.title('Light Intensity vs. Detector Angle')
+plt.grid()
+plt.legend()
+plt.show()
+
+# Find the angle of maximum intensity
+max_intensity_row = sky_df_clean.loc[sky_df_clean['intensity'].idxmax()]
+max_angle = max_intensity_row['angle']
+max_intensity = max_intensity_row['intensity']
+
+print(f"Maximum light intensity: {max_intensity:.2f} at angle {max_angle:.2f} degrees")
+
