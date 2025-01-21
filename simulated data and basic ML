@@ -1,0 +1,237 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Jan 20 18:03:54 2025
+
+@author: henry
+"""
+
+import numpy as np
+import pandas as pd
+from scipy.signal import savgol_filter, find_peaks
+from scipy.fft import fft
+
+# Parameters for simulation
+n_samples = 1000  # Total number of data points
+time = np.linspace(0, 100000, n_samples)  # Simulated time (0 to 10 seconds)
+
+# Simulate classes
+np.random.seed(42)
+cloud_types = ['thick', 'moderate', 'thin']
+data = []
+
+for cloud_type in cloud_types:
+    if cloud_type == 'thick':
+        intensity = np.random.normal(100, 30, n_samples) + 20 * np.sin(2 * np.pi * time * 0.5)
+    elif cloud_type == 'moderate':
+        intensity = np.random.normal(300, 50, n_samples) + 40 * np.sin(2 * np.pi * time * 1.5)
+    elif cloud_type == 'thin':
+        intensity = np.random.normal(600, 20, n_samples) + 10 * np.sin(2 * np.pi * time * 3.0)
+
+    # Smooth the intensity to mimic real-world data
+    smoothed_intensity = savgol_filter(intensity, window_length=51, polyorder=3)
+
+    # Extract features
+    mean_intensity = np.mean(smoothed_intensity)
+    variance_intensity = np.var(smoothed_intensity)
+    gradient_intensity = np.gradient(smoothed_intensity)
+    num_peaks, _ = find_peaks(smoothed_intensity, height=0)
+    avg_peak_distance = np.mean(np.diff(num_peaks)) if len(num_peaks) > 1 else 0
+    fft_values = fft(smoothed_intensity)
+    dominant_frequency = np.argmax(np.abs(fft_values))
+
+    # Create a feature row
+    data.append({
+        'cloud_type': cloud_type,
+        'mean_intensity': mean_intensity,
+        'variance_intensity': variance_intensity,
+        'gradient_intensity': np.mean(gradient_intensity),
+        'num_peaks': len(num_peaks),
+        'avg_peak_distance': avg_peak_distance,
+        'dominant_frequency': dominant_frequency
+    })
+
+# Convert to DataFrame
+df = pd.DataFrame(data)
+print(df.head())
+
+#%%
+
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, confusion_matrix
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+# Prepare features and target
+X = df.drop('cloud_type', axis=1)
+y = df['cloud_type']
+
+# Split into train and test sets
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Train the Random Forest Classifier
+clf = RandomForestClassifier(n_estimators=100, random_state=42)
+clf.fit(X_train, y_train)
+
+# Evaluate the model
+y_pred = clf.predict(X_test)
+print(classification_report(y_test, y_pred))
+
+# Confusion matrix
+cm = confusion_matrix(y_test, y_pred)
+sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=clf.classes_, yticklabels=clf.classes_)
+plt.title("Confusion Matrix")
+plt.xlabel("Predicted")
+plt.ylabel("True")
+plt.show()
+
+# Feature importances
+importances = clf.feature_importances_
+plt.barh(X.columns, importances)
+plt.title("Feature Importance")
+plt.xlabel("Importance")
+plt.ylabel("Features")
+plt.show()
+
+#%%
+
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.signal import savgol_filter
+
+# Parameters
+n_samples = 1440  # Simulate one measurement per minute for 24 hours
+time = np.linspace(-5, 7, n_samples)  # Time from sunrise to sunset (0 to 12 hours)
+sun_angle = np.pi * time / 12  # Sun angle: 0 (sunrise), pi/2 (noon), pi (sunset)
+detector_angle = np.pi / 4  # Detector not perfectly aligned with the sun (45 degrees)
+
+# Sun intensity (simplified as a cosine function for zenith angle)
+sun_intensity = np.maximum(np.cos(sun_angle), 0)
+
+# Modulate sun intensity based on the detector's angle to the sun
+detector_response = np.maximum(np.cos(sun_angle - detector_angle), 0)
+intensity_no_clouds = sun_intensity * detector_response
+
+# Simulate cloud cover
+np.random.seed(42)
+cloud_cover = np.random.choice(['thick', 'moderate', 'thin', 'clear'], size=n_samples, p=[0.2, 0.3, 0.3, 0.2])
+
+# Cloud attenuation factors
+cloud_factors = {
+    'thick': 0.2,
+    'moderate': 0.5,
+    'thin': 0.8,
+    'clear': 1.0
+}
+cloud_attenuation = np.array([cloud_factors[cloud] for cloud in cloud_cover])
+
+# Apply cloud attenuation
+intensity_with_clouds = intensity_no_clouds * cloud_attenuation
+
+# Add small random fluctuations to simulate real-world noise
+noise = np.random.normal(0, 0.05, n_samples)
+intensity_with_clouds = savgol_filter(intensity_with_clouds + noise, window_length=51, polyorder=3)
+
+# Plotting
+plt.figure(figsize=(12, 6))
+plt.plot(time, intensity_no_clouds, label="Clear Sky (No Clouds)", linestyle='--')
+plt.plot(time, intensity_with_clouds, label="Cloudy Sky (Simulated)")
+plt.fill_between(time, 0, intensity_with_clouds, alpha=0.3, label="Cloudy Attenuation")
+plt.title("Simulated Light Intensity Over Time (Sunrise to Sunset)")
+plt.xlabel("Time (Hours)")
+plt.ylabel("Light Intensity")
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# Plot cloud type over time
+plt.figure(figsize=(12, 3))
+plt.scatter(time, [cloud_factors[c] for c in cloud_cover], c='blue', alpha=0.5, label="Cloud Type Factor")
+plt.title("Cloud Attenuation Factor Over Time")
+plt.xlabel("Time (Hours)")
+plt.ylabel("Attenuation Factor")
+plt.legend()
+plt.grid(True)
+plt.show()
+#%%
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_squared_error, r2_score
+from scipy.signal import savgol_filter
+
+# Simulate data
+n_samples = 1440
+time = np.linspace(0, 120, n_samples)
+sun_angle = np.pi * time / 12
+detector_angle = np.pi / 4
+
+sun_intensity = np.maximum(np.cos(sun_angle), 0)
+detector_response = np.maximum(np.cos(sun_angle - detector_angle), 0)
+clear_intensity = sun_intensity * detector_response
+
+cloud_factors = {'thick': 0.7, 'moderate': 0.8, 'thin': 0.9, 'clear': 1.0}
+cloud_cover = np.random.choice(['thick', 'moderate', 'thin', 'clear'], size=n_samples, p=[0.2, 0.3, 0.3, 0.2])
+cloud_attenuation = np.array([cloud_factors[cloud] for cloud in cloud_cover])
+attenuated_intensity = clear_intensity * cloud_attenuation
+
+# Add noise and smooth
+noise = np.random.normal(0, 0.05, n_samples)
+attenuated_intensity = savgol_filter(attenuated_intensity + noise, window_length=51, polyorder=3)
+
+# Prepare dataset
+data = pd.DataFrame({
+    'time': time,
+    'attenuated_intensity': attenuated_intensity,
+    'clear_intensity': clear_intensity
+})
+
+# Features and target
+X = data[['attenuated_intensity']]  # Use raw attenuated intensity as feature
+y = data['clear_intensity']  # Clear sky intensity as target
+
+# Split data
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Train a regression model
+model = RandomForestRegressor(n_estimators=100, random_state=42)
+model.fit(X_train, y_train)
+
+# Predict and evaluate
+y_pred = model.predict(X_test)
+mse = mean_squared_error(y_test, y_pred)
+r2 = r2_score(y_test, y_pred)
+
+print(f"Mean Squared Error: {mse:.4f}")
+print(f"R² Score: {r2:.4f}")
+
+# Plot true vs predicted values
+plt.figure(figsize=(10, 6))
+plt.scatter(y_test, y_pred, alpha=0.6)
+plt.plot([0, 1], [0, 1], color='red', linestyle='--', label='Ideal Fit')
+plt.title("True vs Predicted Clear Sky Intensity")
+plt.xlabel("True Clear Intensity")
+plt.ylabel("Predicted Clear Intensity")
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# Visualize time-series reconstruction
+plt.figure(figsize=(12, 6))
+plt.plot(time, clear_intensity, label="True Clear Intensity", linestyle='--')
+plt.plot(time, attenuated_intensity, label="Cloud-Attenuated Intensity", alpha=0.7)
+plt.plot(time[:len(y_pred)], model.predict(X[:len(y_pred)]), label="Predicted Clear Intensity")
+plt.title("Reconstruction of Clear Intensity from Cloud-Attenuated Data")
+plt.xlabel("Time (Hours)")
+plt.ylabel("Light Intensity")
+plt.legend()
+plt.xlim(0,24)
+plt.grid(True)
+plt.show()
+
+
+
+
+
