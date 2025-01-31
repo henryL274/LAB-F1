@@ -1,0 +1,111 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+from scipy.optimize import curve_fit
+
+# Define the idealized functions for fitting
+def square_filter(wavelength, threshold):
+    """A square filter function that turns on above a threshold."""
+    return np.where(wavelength >= threshold, 1.0, 0.0)
+
+def gaussian_filter(wavelength, center, width):
+    """A Gaussian filter centered at 'center' with 'width'."""
+    return np.exp(-0.5 * ((wavelength - center) / width) ** 2)
+
+# Function to apply moving average
+def moving_average(data, window_size):
+    """Applies a simple moving average filter."""
+    return np.convolve(data, np.ones(window_size)/window_size, mode='same')
+
+# Load the filter spectra
+file_paths = {
+    "Blue Filter": "C:/Users/henry/Documents/LAB 1 F1/spectra/blue filter.csv",
+    "Red Filter": "C:/Users/henry/Documents/LAB 1 F1/spectra/red filter.csv",
+    "Green Filter": "C:/Users/henry/Documents/LAB 1 F1/spectra/green filter.csv",
+    "White LED": "C:/Users/henry/Documents/LAB 1 F1/spectra/white LED only.csv"
+}
+
+colors = {
+    "Blue Filter": "blue",
+    "Red Filter": "red",
+    "Green Filter": "green",
+    "White LED": "black"
+}
+
+# Load and smooth the White LED spectrum
+df_white = pd.read_csv(file_paths["White LED"], skiprows=50, delimiter=",", header=None, engine="python")
+df_white = df_white.apply(pd.to_numeric, errors="coerce").dropna()
+wavelength_white = df_white.iloc[:, 0].values
+intensity_white = df_white.iloc[:, 1].values
+
+# Create a figure for transmission plots
+plt.figure(figsize=(10, 6))
+
+# Explicitly plot the White LED as a flat line at 1.0
+plt.plot(wavelength_white, np.ones_like(wavelength_white), label="White LED (Normalized)", linestyle="dashed", color="black")
+
+# Loop through the colored filter files
+for label, path in file_paths.items():
+    if label == "White LED":
+        continue  # Skip White LED since we use it as the reference
+
+    # Load the filter spectrum
+    df = pd.read_csv(path, skiprows=50, delimiter=",", header=None, engine="python")
+    df = df.apply(pd.to_numeric, errors="coerce").dropna()
+    wavelength = df.iloc[:, 0].values
+    intensity = df.iloc[:, 1].values
+
+    # Apply a large moving average to smooth the intensity
+    smoothed_intensity = moving_average(intensity, window_size=40)  # Large window for smoothing
+
+    # Interpolate the white LED intensity at the filter's wavelengths
+    intensity_white_interp = np.interp(wavelength, wavelength_white, intensity_white)
+    valid_mask = intensity_white_interp > 0.001  # Ignore very low white LED values
+
+    # Compute transmission
+    transmission = np.zeros_like(smoothed_intensity)  # Default to zero
+    transmission[valid_mask] = smoothed_intensity[valid_mask] / intensity_white_interp[valid_mask]
+
+    # Plot the experimental transmission (smoothed)
+    plt.plot(wavelength[valid_mask], transmission[valid_mask], label=f"{label} Filter", color=colors[label])
+
+    # Fit the idealized function
+    if label == "Red Filter":
+        # Use only data between 650 nm and 700 nm for the red filter
+        mask_red = (wavelength >= 600) & (wavelength <= 800)
+        popt, _ = curve_fit(square_filter, wavelength[mask_red], transmission[mask_red], p0=[650])
+        threshold = popt[0]
+        print(f"Red Filter: Threshold = {threshold} nm")
+
+        # Plot the fitted square filter
+        plt.plot(wavelength[mask_red], square_filter(wavelength[mask_red], threshold), color="darkred", linestyle="--")
+    
+    elif label == "Blue Filter":
+        # Use only data between 420 nm and 480 nm for the blue filter (30 nm around 450 nm)
+        mask_blue = (wavelength >= 410) & (wavelength <= 470)
+        popt, _ = curve_fit(gaussian_filter, wavelength[mask_blue], transmission[mask_blue], p0=[440, 40])
+        center, width = popt
+        print(f"Blue Filter: Center = {center} nm, Width = {width} nm")
+
+        # Plot the fitted Gaussian filter
+        plt.plot(wavelength[mask_blue], gaussian_filter(wavelength[mask_blue], center, width), color="darkblue", linestyle="--")
+    
+    elif label == "Green Filter":
+        # Use only data between 520 nm and 580 nm for the green filter (30 nm around 550 nm)
+        mask_green = (wavelength >= 450) & (wavelength <= 600)
+        popt, _ = curve_fit(gaussian_filter, wavelength[mask_green], transmission[mask_green], p0=[550, 30])
+        center, width = popt
+        print(f"Green Filter: Center = {center} nm, Width = {width} nm")
+
+        # Plot the fitted Gaussian filter
+        plt.plot(wavelength[mask_green], gaussian_filter(wavelength[mask_green], center, width), color="darkgreen", linestyle="--")
+
+# Customize the plot
+plt.xlabel("Wavelength (nm)")
+plt.ylabel("Transmission (Filter / White LED)")
+plt.title("Filter Transmission Properties (Smoothed and Fitted) with Ideal Attenuation Shapes")
+plt.legend()
+plt.grid()
+plt.ylim(0, 1.1)
+plt.xlim(400, 800)  # Keep x-axis between 400 nm and 800 nm for better visualization
+plt.show()
