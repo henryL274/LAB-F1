@@ -1,3 +1,11 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Feb  3 15:21:58 2025
+
+@author: hannanasir
+"""
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -261,8 +269,8 @@ plt.show()
 # Scaling Factors (inverse of normalized areas)
 scaling_factors = {
     "red": 1.0,  # Reference
-    "blue": 1.0 / area_blue_normalised,
-    "green": 1.0 / area_green_normalised
+    "blue": scale_blue,
+    "green": scale_green
 }
 
 # Apply scaling to thermopile intensity readings
@@ -297,9 +305,9 @@ plt.show()
 
 #%%
 
-scaledred =red_data["Watts/m²"] 
-scaledgreen = green_data["Watts/m²"] 
-scaledblue = blue_data["Watts/m²"]
+scaledred =red_data["Watts/m²"] * scaling_factors["red"]
+scaledgreen = green_data["Watts/m²"] * scaling_factors["green"]
+scaledblue = blue_data["Watts/m²"] * scaling_factors["blue"]
 
 
 import numpy as np
@@ -410,7 +418,7 @@ print(f"Average Optical Depth for Blue Filter: {average_optical_depth_blue:.4f}"
 aerosol_optical_depth_red = average_optical_depth_red - (1.02478/1.01325)*0.00877*((670*10**-3)**-4.05)
 aerosol_optical_depth_blue = average_optical_depth_blue - (1.02478/1.01325)*0.00877*((437*10**-3)**-4.05)
 aerosol_optical_depth_green = average_optical_depth_green - (1.02478/1.01325)*0.00877*((550*10**-3)**-4.05)
-print(aerosol_optical_depth_red)
+print(aerosol_optical_depth_green)
 #%%
 #plot ln(optical depth) = ln(turbidity) - angstrom(ln(wavelength))
 #red": 670, "green": 550.06, "blue": 437.71}
@@ -419,7 +427,7 @@ print(aerosol_optical_depth_red)
 #x = ln(lambda)
 #y = ln(optical depth)
 
-x = np.array([math.log10(670), math.log10(550.06), math.log(437.71)])
+x = np.array([math.log10(670e-9), math.log10(550.06e-9), math.log(437.71e-9)])
 y = np.array([math.log10(aerosol_optical_depth_red), math.log10(aerosol_optical_depth_green), math.log10(aerosol_optical_depth_blue)])
 
 #import math UNSCALED
@@ -458,8 +466,8 @@ plt.scatter(x,y, label="Data", color="blue")
 plt.plot(x, m * x + c, label=f"Fit: y = {m:.4f}x + {c:.4f}", color="red")
 
 # Annotate the parameters on the plot
-plt.text(min(x), max(y) - 0.1, f"Ångström Coefficient: {m:.4f}", fontsize=10, color="black")
-plt.text(min(x), max(y) - 0.11, f"Turbidity: {turbidity_factor:.4f}", fontsize=10, color="black")
+plt.text(min(x), max(y) - 0.2, f"Ångström Coefficient: {m:.4f}", fontsize=10, color="black")
+plt.text(min(x), max(y) - 0.3, f"Turbidity: {turbidity_factor:.4f}", fontsize=10, color="black")
 
 plt.xlabel("ln(Wavelength) (ln λ)")
 plt.ylabel("ln(Optical Depth) (ln τ)")
@@ -467,6 +475,14 @@ plt.title("Ångström Law Fit")
 plt.legend()
 plt.grid()
 plt.show()
+
+
+
+
+
+
+
+
 
 
 
