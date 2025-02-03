@@ -292,10 +292,9 @@ plt.show()
 
 #%%
 
-scaledred =red_data["Watts/m²"] * scaling_factors["red"]
-scaledgreen = green_data["Watts/m²"] * scaling_factors["green"]
-scaledblue = blue_data["Watts/m²"] * scaling_factors["blue"]
-
+scaledred =red_data["Watts/m²"] 
+scaledgreen = green_data["Watts/m²"] 
+scaledblue = blue_data["Watts/m²"]
 
 
 import numpy as np
@@ -399,37 +398,54 @@ print(f"Average Optical Depth for Red Filter: {average_optical_depth_red:.4f}")
 print(f"Average Optical Depth for Blue Filter: {average_optical_depth_blue:.4f}")
 
 # Plot optical depth
-
-
+#%% 
+#OPITCAL DEPTH NEEDS RAYLEIGH OPTICAL DEPTH MINUSED
+#https://web.gps.caltech.edu/~vijay/Papers/Rayleigh_Scattering/Bodhaine-etal-99.pdf
+#TR = (1.02478/1.01325)*0.00877*(lambda**-4.05)
+aerosol_optical_depth_red = average_optical_depth_red - (1.02478/1.01325)*0.00877*((670*10**-3)**-4.05)
+aerosol_optical_depth_blue = average_optical_depth_blue - (1.02478/1.01325)*0.00877*((437*10**-3)**-4.05)
+aerosol_optical_depth_green = average_optical_depth_green - (1.02478/1.01325)*0.00877*((550*10**-3)**-4.05)
+print(aerosol_optical_depth_red)
 #%%
 #plot ln(optical depth) = ln(turbidity) - angstrom(ln(wavelength))
 #red": 670, "green": 550.06, "blue": 437.71}
 #red = ln(670), green = ln()
 
-import math
-#optical depth green = -0.0877, red = 3.0514, blue = 0.2729
-#GREEN IS NEGATIVE YOU CANT HAVE -VE LN
-x =  6.507277712, 6.081556591
-y = 1.1156, -1.1298649
+#x = ln(lambda)
+#y = ln(optical depth)
 
-plt.plot(x,y)
+x = np.array([math.log10(670), math.log10(550.06), math.log(437.71)])
+y = np.array([math.log10(aerosol_optical_depth_red), math.log10(aerosol_optical_depth_green), math.log10(aerosol_optical_depth_blue)])
+
+#import math UNSCALED
+#Average Optical Depth for Green Filter: 2.6944
+#Average Optical Depth for Red Filter: 3.0514
+#Average Optical Depth for Blue Filter: 2.1456
+
+#x = np.array([-14.21598812, -14.41323847, -14.64170925])
+#y = np.array([1.115600502, 0.9911755451, 0.763412335])
+
+#SCALED
+#Average Optical Depth for Green Filter: -0.0877
+#Average Optical Depth for Red Filter: 3.0514
+#Average Optical Depth for Blue Filter: 0.2729
+
+#x = np.array([-14.21598812, -14.64170925])
+#y = np.array([1.115600502, -1.2986])
+
+m, c = np.polyfit(x,y,1)
+print(f"Gradient: {m}")
+print(f"Y-intercept: {c}")
+
+plt.scatter(x,y)
 
 
-# Given points
-x1, y1 = 6.507277712, 1.1156
-x2, y2 = 6.081556591, -1.1298649
 
-# Compute gradient (slope)
-m = (y2 - y1) / (x2 - x1)
 
-# Compute y-intercept
-c = y1 - m * x1
 
-#turbidity = exp(c) rn c = -33.207018672349875
 
-# Print results
-print(f"- angstrom (slope): {m}")
-print(f"Turbidity: 3.787 x 10^-15")
+
+
 
 
 
