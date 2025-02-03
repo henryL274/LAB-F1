@@ -9,9 +9,33 @@ red_data = pd.read_csv("C:/Users/henry/Documents/LAB 1 F1/final filter data/dete
 green_data = pd.read_csv("C:/Users/henry/Documents/LAB 1 F1/final filter data/detector2.csv")
 blue_data = pd.read_csv("C:/Users/henry/Documents/LAB 1 F1/final filter data/detector1.csv")
 
-# Convert time to hours
-time_hoursg = green_data["Seconds"] / 3600 + 12.883333333333  
-time_hoursr = red_data["Seconds"] / 3600 + 12.883333333333  
+# --- Find the stable breakage point in the red data ---
+
+# Threshold for determining when the intensity is constant (tolerance around 8)
+tolerance = 0.1  # Intensity values must be within 8 +/- 0.1 for it to be considered constant
+
+# Find where the intensity stays within the tolerance of 8
+constant_region = red_data[red_data["Watts/m²"].between(8 - tolerance, 8 + tolerance)]
+
+# If there is a region where it stays constant, get the first index of this region
+if not constant_region.empty:
+    breakage_point = constant_region.index[0]  # The first time the intensity stays constant at 8
+else:
+    # If no constant region is found, fallback to the first occurrence of 8
+    breakage_point = red_data[red_data["Watts/m²"] >= 8].index[0]
+
+# --- Filter all data before the breakage point ---
+red_data = red_data.iloc[:breakage_point]
+green_data = green_data.iloc[:breakage_point]
+blue_data = blue_data.iloc[:breakage_point]
+
+# --- Time Conversion for the Filtered Data ---
+time_hoursr= red_data["Seconds"] / 3600 + 12.883333333333
+time_hoursg= green_data["Seconds"] / 3600 + 12.883333333333
+time_hoursg += np.min(time_hoursr) - np.min(time_hoursg)
+# Now, red_data_filtered, green_data_filtered, and blue_data_filtered
+# contain the data up until the point the red intensity became constant at 8.
+
 # --- Define Effective Wavelengths and Uncertainties ---
 effective_wavelengths = {"red": 670, "green": 550.06, "blue": 437.71}
 uncertainties_wavelengths = {"red": 20, "green": 4.83, "blue": 19.57}
@@ -503,9 +527,25 @@ aerosol_optical_depth_red = optical_depth_red - rayleigh_interpr_700
 aerosol_optical_depth_blue = optical_depth_blue - rayleigh_interpg_450
 aerosol_optical_depth_green = optical_depth_green - rayleigh_interpg_550
 
-plt.plot(time_hoursr,aerosol_optical_depth_red,color="red")
-plt.plot(time_hoursg,aerosol_optical_depth_green,color="darkgreen")
-plt.plot(time_hoursg,aerosol_optical_depth_blue,color="darkblue")
+# Plotting aerosol optical depth for each color band
+plt.plot(time_hoursr, aerosol_optical_depth_red, color="red", label="Red (700 nm)", linewidth=2)
+plt.plot(time_hoursg, aerosol_optical_depth_green, color="darkgreen", label="Green (550 nm)", linewidth=2)
+plt.plot(time_hoursg, aerosol_optical_depth_blue, color="darkblue", label="Blue (450 nm)", linewidth=2)
+
+# Adding labels and title
+plt.xlabel('Time (hours)', fontsize=12)
+plt.ylabel('Aerosol Optical Depth', fontsize=12)
+plt.title('Aerosol Optical Depth vs Time', fontsize=14)
+plt.ylim(0,4)
+# Adding grid for better visibility
+plt.grid(True)
+
+# Adding legend
+plt.legend()
+
+# Show the plot
+plt.tight_layout()
+plt.show()
 
 
 #%% 
