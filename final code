@@ -442,8 +442,31 @@ m, c = np.polyfit(x,y,1)
 print(f"Gradient: {m}")
 print(f"Y-intercept: {c}")
 
-plt.scatter(x,y)
+m, c = np.polyfit(x,y,1)
+print(f"Gradient: {m}")
+print(f"Y-intercept: {c}")
+# Extract Ångström parameters
+angstrom_exponent = -m  # α = -gradient
+turbidity_factor = np.exp(c)  # β = e^(intercept)
 
+# Print results
+print(f"Ångström Exponent (α): {angstrom_exponent:.4f}")
+print(f"Turbidity Factor (β): {turbidity_factor:.4f}")
+
+# Plot the data and the linear fit
+plt.scatter(x,y, label="Data", color="blue")
+plt.plot(x, m * x + c, label=f"Fit: y = {m:.4f}x + {c:.4f}", color="red")
+
+# Annotate the parameters on the plot
+plt.text(min(x), max(y) - 0.1, f"Ångström Coefficient: {m:.4f}", fontsize=10, color="black")
+plt.text(min(x), max(y) - 0.11, f"Turbidity: {turbidity_factor:.4f}", fontsize=10, color="black")
+
+plt.xlabel("ln(Wavelength) (ln λ)")
+plt.ylabel("ln(Optical Depth) (ln τ)")
+plt.title("Ångström Law Fit")
+plt.legend()
+plt.grid()
+plt.show()
 
 
 
