@@ -468,22 +468,34 @@ def air_mass(zenith_angle):
         return float('inf')  # Sun below horizon
     return 1 / (math.cos(math.radians(zenith_angle)) + 0.50572 * (96.07995 - zenith_angle) ** -1.6364)
 
-# Wavelengths in micrometers
+# Wavelengths (micrometers) and their uncertainties (nm -> micrometers)
 wavelengths = [0.43717, 0.55068, 0.670]
+sigma_lambda_nm = 10  # Assumed uncertainty in nm
+sigma_lambda = sigma_lambda_nm / 1000  # Convert to micrometers
+
+# Compute nominal Rayleigh optical depth values
 tau_R = {wavelength: rayleigh_optical_depth(wavelength) for wavelength in wavelengths}
 
 # Set timezone to UTC
 utc = pytz.utc
 
-# Define start and end times in UTC (timezone-aware)
+# Define start and end times in UTC
 start_time = utc.localize(datetime.datetime(2025, 2, 2, 13, 53, 0))  
-end_time = utc.localize(datetime.datetime(2025, 2, 2, 16, 50, 0))
+end_time = utc.localize(datetime.datetime(2025, 2, 2, 14, 25, 0))
 
 # Lists to store data for plotting
 times = []
 tau_450 = []
+tau_450_upper = []
+tau_450_lower = []
+
 tau_550 = []
+tau_550_upper = []
+tau_550_lower = []
+
 tau_700 = []
+tau_700_upper = []
+tau_700_lower = []
 
 # Start looping every second
 current_time = start_time
@@ -495,32 +507,59 @@ while current_time <= end_time:
     # Compute air mass
     m = air_mass(zenith_angle)
 
-    # Compute effective Rayleigh Optical Depth for each wavelength
-    effective_tau = {wavelength: tau_R[wavelength] * m for wavelength in wavelengths}
+    # Compute effective Rayleigh Optical Depth and its uncertainty
+    effective_tau = {}
+    tau_uncertainty = {}
+
+    for wavelength in wavelengths:
+        effective_tau[wavelength] = tau_R[wavelength] * m
+        tau_uncertainty[wavelength] = 4.08 * effective_tau[wavelength] * (sigma_lambda / wavelength)
 
     # Store values for plotting
     times.append(current_time)
+    
     tau_450.append(effective_tau[0.43717])
+    tau_450_upper.append(effective_tau[0.43717] + tau_uncertainty[0.43717])
+    tau_450_lower.append(effective_tau[0.43717] - tau_uncertainty[0.43717])
+
     tau_550.append(effective_tau[0.55068])
+    tau_550_upper.append(effective_tau[0.55068] + tau_uncertainty[0.55068])
+    tau_550_lower.append(effective_tau[0.55068] - tau_uncertainty[0.55068])
+
     tau_700.append(effective_tau[0.670])
+    tau_700_upper.append(effective_tau[0.670] + tau_uncertainty[0.670])
+    tau_700_lower.append(effective_tau[0.670] - tau_uncertainty[0.670])
 
     # Increment time by 1 second
     current_time += datetime.timedelta(seconds=1)
 
+def datetime_to_decimal_hours(dt):
+    """Convert datetime object to decimal hours."""
+    return dt.hour + dt.minute / 60 + dt.second / 3600
+
+# Convert 'times' to decimal hours
+times_decimal = [datetime_to_decimal_hours(t) for t in times]
+
 # Plot the results
 plt.figure(figsize=(10, 5))
-plt.plot(times, tau_450, label='437.17 nm (Blue)', color='blue')
-plt.plot(times, tau_550, label='550.068 nm (Green)', color='green')
-plt.plot(times, tau_700, label='670 nm (Red)', color='red')
+
+# Plot with shaded uncertainty bounds
+plt.plot(times_decimal, tau_450, label='437.17 nm (Blue)', color='blue')
+plt.fill_between(times_decimal, tau_450_lower, tau_450_upper, color='blue', alpha=0.2)
+
+plt.plot(times_decimal, tau_550, label='550.068 nm (Green)', color='green')
+plt.fill_between(times_decimal, tau_550_lower, tau_550_upper, color='green', alpha=0.2)
+
+plt.plot(times_decimal, tau_700, label='670 nm (Red)', color='red')
+plt.fill_between(times_decimal, tau_700_lower, tau_700_upper, color='red', alpha=0.2)
 
 # Formatting the plot
-plt.xlabel("Time (Hours)")
+plt.xlabel("Time (UTC hours)")
 plt.ylabel("Rayleigh Optical Depth")
-
-plt.legend()
-#plt.xticks(rotation=45)  # Rotate time labels for better readability
+#plt.title("Rayleigh Optical Depth vs. Time with Uncertainty (London, Feb 2, 2025)")
+plt.legend()  # Rotate time labels for better readability
 plt.grid(True)
-
+plt.ylim(0,1)
 # Show the plot
 plt.show()
 
@@ -545,10 +584,21 @@ aerosol_optical_depth_red = optical_depth_red - rayleigh_interpg_700
 aerosol_optical_depth_blue = optical_depth_blue - rayleigh_interpb_450
 aerosol_optical_depth_green = optical_depth_green - rayleigh_interpg_550
 
+def ray_unc(upper,lower):
+    return (upper+lower)/2
+
+uncertainty_700 = uncertainty_total_700 - ray_unc(tau_700_upper,tau_700_lower)
+uncertainty_450 = uncertainty_total_450 - ray_unc(tau_450_upper,tau_450_lower)
+uncertainty_550 = uncertainty_total_550 - ray_unc(tau_550_upper,tau_550_lower)
+
+
 # Plotting aerosol optical depth for each color band
 plt.plot(time_hoursg, aerosol_optical_depth_red, color="red", label="Red (700 nm)", linewidth=2)
+plt.fill_between(time_hoursg, aerosol_optical_depth_red - uncertainty_700, optical_depth_red + uncertainty_700, color='red', alpha=0.2)
 plt.plot(time_hoursg, aerosol_optical_depth_green, color="darkgreen", label="Green (550 nm)", linewidth=2)
+plt.fill_between(time_hoursg, aerosol_optical_depth_red - uncertainty_550, optical_depth_red + uncertainty_550, color='green', alpha=0.2)
 plt.plot(time_hoursb, aerosol_optical_depth_blue, color="darkblue", label="Blue(450 nm)", linewidth=2)
+plt.fill_between(time_hoursg, aerosol_optical_depth_red - uncertainty_450, optical_depth_red + uncertainty_450, color='blue', alpha=0.2)
 
 
 
