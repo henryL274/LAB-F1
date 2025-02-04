@@ -548,14 +548,6 @@ plt.tight_layout()
 plt.show()
 
 
-#%% 
-#OPITCAL DEPTH NEEDS RAYLEIGH OPTICAL DEPTH MINUSED
-#https://web.gps.caltech.edu/~vijay/Papers/Rayleigh_Scattering/Bodhaine-etal-99.pdf
-#TR = (1.02478/1.01325)*0.00877*(lambda**-4.05)
-aerosol_optical_depth_red = average_optical_depth_red - (1.02478/1.01325)*0.00877*((670*10**-3)**-4.05)
-aerosol_optical_depth_blue = average_optical_depth_blue - (1.02478/1.01325)*0.00877*((437*10**-3)**-4.05)
-aerosol_optical_depth_green = average_optical_depth_green - (1.02478/1.01325)*0.00877*((550*10**-3)**-4.05)
-print(aerosol_optical_depth_red)
 #%%
 #plot ln(optical depth) = ln(turbidity) - angstrom(ln(wavelength))
 #red": 670, "green": 550.06, "blue": 437.71}
@@ -564,9 +556,11 @@ print(aerosol_optical_depth_red)
 #x = ln(lambda)
 #y = ln(optical depth)
 
-x = np.array([math.log10(670*1e-3), math.log10(550.06*1e-3), math.log(437.71*1e-3)])
-y = np.array([math.log10(aerosol_optical_depth_red), math.log10(aerosol_optical_depth_green), math.log10(aerosol_optical_depth_blue)])
-
+x = np.array([math.log(670*1e-3), math.log(550.06*1e-3), math.log(437.71*1e-3)])
+log_y_red = np.log(aerosol_optical_depth_red)  # Taking log for each element in the red optical depth array
+log_y_green = np.log(aerosol_optical_depth_green)  # Taking log for each element in the green optical depth array
+log_y_blue = np.log(aerosol_optical_depth_blue)  # Taking log for each element in the blue optical depth array
+y = np.array([log_y_red,log_y_green,log_y_blue]).T
 #import math UNSCALED
 #Average Optical Depth for Green Filter: 2.6944
 #Average Optical Depth for Red Filter: 3.0514
@@ -582,29 +576,70 @@ y = np.array([math.log10(aerosol_optical_depth_red), math.log10(aerosol_optical_
 
 #x = np.array([-14.21598812, -14.64170925])
 #y = np.array([1.115600502, -1.2986])
+angstroms=[]
+turbidities=[]
+for i in y:
+    m, c = np.polyfit(x,i,1)
+    angstroms.append(-m)
+    turbidities.append(np.exp(c))
 
-m, c = np.polyfit(x,y,1)
-print(f"Gradient: {m}")
-print(f"Y-intercept: {c}")
-# Extract Ångström parameters
-angstrom_exponent = -m  # α = -gradient
-turbidity_factor = np.exp(c)  # β = e^(intercept)
+# Create subplots: one row, two columns
+fig, ax = plt.subplots(1, 2, figsize=(12, 6))
 
-# Print results
-print(f"Ångström Exponent (α): {angstrom_exponent:.4f}")
-print(f"Turbidity Factor (β): {turbidity_factor:.4f}")
+# Plot Angström exponents on the first subplot
+ax[0].plot(time_hoursg, angstroms, color="red", linewidth=2)
+ax[0].set_title(f'Angström Exponent vs Time (mean = {np.mean(angstroms):.2f})', fontsize=14)
+ax[0].set_xlabel('Time (hours)', fontsize=12)
+ax[0].set_ylabel('Angström Exponent', fontsize=12)
+ax[0].grid(True)
+
+# Plot Turbidity on the second subplot
+ax[1].plot(time_hoursg, turbidities, color="blue", linewidth=2)
+ax[1].set_title(f'Turbidity vs Time (mean = {np.mean(turbidities):.2f})', fontsize=14)
+ax[1].set_xlabel('Time (hours)', fontsize=12)
+ax[1].set_ylabel('Turbidity', fontsize=12)
+ax[1].grid(True)
+
+# Adjust layout to make sure labels and titles are clear
+plt.tight_layout()
+
+# Show the plot
+plt.show()
+
+#%%
+import random
+
+# Randomly select an index for the data
+choice = random.randint(0, len(y) - 1)  # Ensure the index is within bounds of y
+
+# Fit a line to the chosen data with covariance matrix
+(m, c), cov = np.polyfit(x, y[choice], 1, cov=True)
+
+# Extract standard errors (uncertainties) from covariance matrix
+m_uncertainty = np.sqrt(cov[0, 0])  # Standard deviation of slope
+c_uncertainty = np.sqrt(cov[1, 1])  # Standard deviation of intercept
 
 # Plot the data and the linear fit
-plt.scatter(x,y, label="Data", color="blue")
+plt.scatter(x, y[choice], label="Data", color="blue")
 plt.plot(x, m * x + c, label=f"Fit: y = {m:.4f}x + {c:.4f}", color="red")
 
-# Annotate the parameters on the plot
-plt.text(min(x), max(y) - 0.1, f"Ångström Coefficient: {m:.4f}", fontsize=10, color="black")
-plt.text(min(x), max(y) - 0.11, f"Turbidity: {turbidity_factor:.4f}", fontsize=10, color="black")
+# Display the Ångström coefficient and turbidity with uncertainties
+plt.text(min(x), max(y[choice]) - 0.4, f"Ångström Coeff: {-m:.4f} ± {m_uncertainty:.4f}", fontsize=10, color="black")
+plt.text(min(x), max(y[choice]) - 0.5, f"Turbidity: {np.exp(c):.4f} ± {np.exp(c) * c_uncertainty:.4f}", fontsize=10, color="black")
 
+# Labeling and title
 plt.xlabel("ln(Wavelength) (ln λ)")
 plt.ylabel("ln(Optical Depth) (ln τ)")
-plt.title("Ångström Law Fit")
+plt.title(f"Ångström Law Fit Time: {choice / 3600 + 13.8333:.4f} hours")
 plt.legend()
-plt.grid()
+plt.grid(True)
+
+# Show the plot
 plt.show()
+
+# Print uncertainties for reference
+print(f"Ångström Coefficient: {-m:.4f} ± {m_uncertainty:.4f}")
+print(f"Turbidity: {np.exp(c):.4f} ± {np.exp(c) * c_uncertainty:.4f}")
+
+
+
