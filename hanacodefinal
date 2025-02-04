@@ -1,0 +1,684 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Feb  4 18:41:36 2025
+
+@author: hannanasir
+"""
+
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.stats import linregress
+import scipy.integrate as spi
+
+# --- Load Data ---
+blue_data = pd.read_csv("/Users/hannanasir/Desktop/jan15/detector3new.csv")
+green_data = pd.read_csv("/Users/hannanasir/Desktop/jan15/detector2.csv")
+red_data = pd.read_csv("/Users/hannanasir/Desktop/jan15/detector1.csv")
+
+# --- Find the stable breakage point in the red data ---
+
+# Threshold for determining when the intensity is constant (tolerance around 8)
+tolerance = 0.1  # Intensity values must be within 8 +/- 0.1 for it to be considered constant
+
+# Find where the intensity stays within the tolerance of 8
+constant_region = blue_data[blue_data["Watts/m²"].between(8 - tolerance, 8 + tolerance)]
+
+# If there is a region where it stays constant, get the first index of this region
+if not constant_region.empty:
+    breakage_point = constant_region.index[0]  # The first time the intensity stays constant at 8
+else:
+    # If no constant region is found, fallback to the first occurrence of 8
+    breakage_point = blue_data[blue_data["Watts/m²"] >= 8].index[0]
+
+# --- Filter all data before the breakage point ---
+red_data = red_data.iloc[:breakage_point]
+green_data = green_data.iloc[:breakage_point]
+blue_data = blue_data.iloc[:breakage_point]
+
+# --- Time Conversion for the Filtered Data ---
+time_hoursb= blue_data["Seconds"] / 3600 + 12.883333333333
+time_hoursg= green_data["Seconds"] / 3600 + 12.883333333333
+time_hoursg += np.min(time_hoursb) - np.min(time_hoursg)
+# Now, red_data_filtered, green_data_filtered, and blue_data_filtered
+# contain the data up until the point the red intensity became constant at 8.
+
+# --- Define Effective Wavelengths and Uncertainties ---
+effective_wavelengths = {"red": 670, "green": 550.06, "blue": 437.71}
+uncertainties_wavelengths = {"red": 20, "green": 4.83, "blue": 19.57}
+
+# --- Define Constants ---
+I0 = {"red": 1.0, "green": (1.0/0.0619), "blue": (1.0/0.1537)}  # Extraterrestrial solar intensities (arbitrary)
+tau_R = {"red": 0.05, "green": 0.10, "blue": 0.23}  # Rayleigh scattering values
+
+#%%
+
+plt.figure(figsize=(12, 6))
+plt.plot(time_hoursg, red_data["Watts/m²"], label="Red Filter", color="red")
+plt.fill_between(time_hoursg, red_data["Watts/m²"] - 1.44,red_data["Watts/m²"] + 1.44, color='red', alpha=0.2)
+plt.plot(time_hoursg, green_data["Watts/m²"], label="Green Filter", color="green")
+plt.fill_between(time_hoursg, green_data["Watts/m²"] - 1.44,green_data["Watts/m²"] + 1.44, color='green', alpha=0.2)
+plt.plot(time_hoursb, blue_data["Watts/m²"], label="Blue Filter", color="blue")
+plt.fill_between(time_hoursb, blue_data["Watts/m²"] - 1.44, blue_data["Watts/m²"] + 1.44, color='blue', alpha=0.2)
+
+plt.xlabel("Time (Hours)")
+plt.ylabel("Light Intensity (W/m²)")
+plt.ylim(5,22)
+plt.legend()
+plt.grid()
+plt.show()
+
+#%%
+
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+from scipy.optimize import curve_fit
+
+# Define the idealized functions for fitting
+def square_filter(wavelength, threshold):
+    """A square filter function that turns on above a threshold."""
+    return np.where(wavelength >= threshold, 1.0, 0.0)
+
+def gaussian_filter(wavelength, center, width):
+    """A Gaussian filter centered at 'center' with 'width'."""
+    return np.exp(-0.5 * ((wavelength - center) / width) ** 2)
+
+# Function to apply moving average
+def moving_average(data, window_size):
+    """Applies a simple moving average filter."""
+    return np.convolve(data, np.ones(window_size)/window_size, mode='same')
+#%%
+# Load the filter spectra
+file_paths = {
+    "Blue Filter": "/Users/hannanasir/Desktop/jan15/blue filter.csv",
+     "Red Filter": "/Users/hannanasir/Desktop/jan15/red filter.csv",
+     "Green Filter": "/Users/hannanasir/Desktop/jan15/green filter.csv",
+     "White LED": "/Users/hannanasir/Desktop/jan15/white LED only.csv"
+}
+
+colors = {
+    "Blue Filter": "blue",
+    "Red Filter": "red",
+    "Green Filter": "green",
+    "White LED": "black"
+}
+
+# Load and smooth the White LED spectrum
+df_white = pd.read_csv(file_paths["White LED"], skiprows=50, delimiter=",", header=None, engine="python")
+df_white = df_white.apply(pd.to_numeric, errors="coerce").dropna()
+wavelength_white = df_white.iloc[:, 0].values
+intensity_white = df_white.iloc[:, 1].values
+
+# Create a figure for transmission plots
+plt.figure(figsize=(10, 6))
+
+# Explicitly plot the White LED as a flat line at 1.0
+plt.plot(wavelength_white, np.ones_like(wavelength_white), label="White LED (Normalized)", linestyle="dashed", color="black")
+
+# Loop through the colored filter files
+for label, path in file_paths.items():
+    if label == "White LED":
+        continue  # Skip White LED since we use it as the reference
+
+    # Load the filter spectrum
+    df = pd.read_csv(path, skiprows=50, delimiter=",", header=None, engine="python")
+    df = df.apply(pd.to_numeric, errors="coerce").dropna()
+    wavelength = df.iloc[:, 0].values
+    intensity = df.iloc[:, 1].values
+
+    # Apply a large moving average to smooth the intensity
+    smoothed_intensity = moving_average(intensity, window_size=40)  # Large window for smoothing
+
+    # Interpolate the white LED intensity at the filter's wavelengths
+    intensity_white_interp = np.interp(wavelength, wavelength_white, intensity_white)
+    valid_mask = intensity_white_interp > 0.001  # Ignore very low white LED values
+
+    # Compute transmission
+    transmission = np.zeros_like(smoothed_intensity)  # Default to zero
+    transmission[valid_mask] = smoothed_intensity[valid_mask] / intensity_white_interp[valid_mask]
+
+    # Plot the experimental transmission (smoothed)
+    plt.plot(wavelength[valid_mask], transmission[valid_mask], label=f"{label} Filter", color=colors[label])
+
+    # Fit the idealized function
+    if label == "Red Filter":
+        # Use only data between 650 nm and 700 nm for the red filter
+        mask_red = (wavelength >= 600) & (wavelength <= 800)
+        popt, _ = curve_fit(square_filter, wavelength[mask_red], transmission[mask_red], p0=[648.331])
+        threshold = popt[0]
+        print(f"Red Filter: Threshold = {threshold} nm")
+
+        # Plot the fitted square filter
+        plt.plot(wavelength[mask_red], square_filter(wavelength[mask_red], threshold), color="darkred", linestyle="--")
+    
+    elif label == "Blue Filter":
+        # Use only data between 420 nm and 480 nm for the blue filter
+        mask_blue = (wavelength >= 400) & (wavelength <= 500)
+        
+        # Extract the actual peak intensity to scale the fit properly
+        peak_blue = np.max(transmission[mask_blue])
+        
+        # Fit the Gaussian model
+        popt_blue, _ = curve_fit(
+            gaussian_filter, wavelength[mask_blue], transmission[mask_blue],
+            p0=[450, 30],  # Initial guess: center at 440nm, width 50nm
+            bounds=([430, 19.567], [460, 70])  # Center must be 430-450nm, width 20-120nm
+        )
+        
+        center_blue, width_blue = popt_blue
+        print(f"Blue Filter Fit: Center = {center_blue:.2f} nm, Width = {width_blue:.2f} nm")
+        
+        # Generate the fitted Gaussian and scale it to the original peak
+        fitted_blue = gaussian_filter(wavelength[mask_blue], center_blue, width_blue) * peak_blue
+        
+        # Plot the fitted Gaussian filter
+        plt.plot(wavelength[mask_blue], fitted_blue, color="darkblue", linestyle="--", label="Blue Fit")
+
+    elif label == "Green Filter":
+        # Use only data between 500 nm and 600 nm for the green filter
+        mask_green = (wavelength >= 500) & (wavelength <= 600)
+        
+        # Extract the actual peak intensity to scale the fit properly
+        peak_green = np.max(transmission[mask_green])
+        
+        # Fit the Gaussian model
+        popt_green, _ = curve_fit(
+            gaussian_filter, wavelength[mask_green], transmission[mask_green],
+            p0=[550, 50],  # Initial guess: center at 550nm, width 50nm
+            bounds=([520, 4.826], [580, 60])  # Center must be 520-580nm, width 20-120nm
+        )
+        
+        center_green, width_green = popt_green
+        print(f"Green Filter Fit: Center = {center_green:.2f} nm, Width = {width_green:.2f} nm")
+        
+        # Generate the fitted Gaussian and scale it to the original peak
+        fitted_green = gaussian_filter(wavelength[mask_green], center_green, width_green) * peak_green
+        
+        # Plot the fitted Gaussian filter
+        plt.plot(wavelength[mask_green], fitted_green, color="darkgreen", linestyle="--", label="Green Fit")
+
+# Customize the plot
+plt.xlabel("Wavelength (nm)")
+plt.ylabel("Transmission Level (Filter / White LED)")
+plt.legend()
+plt.grid()
+plt.ylim(0, 1.1)
+plt.xlim(400, 800)  # Keep x-axis between 400 nm and 800 nm for better visualization
+plt.show()
+#%%
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Constants
+h = 6.626e-34  # Planck's constant (J·s)
+c = 3.00e8     # Speed of light (m/s)
+kB = 1.381e-23 # Boltzmann's constant (J/K)
+T = 5778       # Temperature in Kelvin
+
+# Define the wavelength range (350 nm to 850 nm)
+wavelength = np.linspace(400, 700, 1000)  # in nm
+
+# Define Gaussian and Square Filters
+def gaussian_filter(wavelength, center, width):
+    return np.exp(-0.5 * ((wavelength - center) / width) ** 2)
+
+def square_filter(wavelength, threshold):
+    return np.where(wavelength >= threshold, 1.0, 0.0)
+
+# Define filter properties
+center_blue, width_blue = 437.71, 19.57
+center_green, width_green = 550.06, 4.83
+
+# Define idealized filter transmissions
+blue_ideal = gaussian_filter(wavelength, center_blue, width_blue)*peak_blue
+green_ideal = gaussian_filter(wavelength, center_green, width_green)*peak_green
+red_ideal = square_filter(wavelength, 648.331)
+
+# Planck's Law function
+def planck(wavelength, T):
+    wavelength_m = wavelength * 1e-9  # Convert nm to meters
+    return (2*h*c**2 / wavelength_m**5) / (np.exp(h*c / (wavelength_m * kB * T)) - 1)
+
+# Compute spectral radiance (Blackbody Intensity)
+intensity = planck(wavelength, T)
+intensity /= np.max(intensity)  # Normalize
+
+# Function to multiply filter by blackbody intensity
+def bb_normalise(filter_ideal, bb_intensity):
+    return filter_ideal * bb_intensity  # Element-wise multiplication
+
+# Compute the filtered spectra
+bb_red = bb_normalise(red_ideal, intensity)
+bb_blue = bb_normalise(blue_ideal, intensity)
+bb_green = bb_normalise(green_ideal, intensity)
+
+# Integrate the areas under the curves
+area_red = np.trapz(bb_red, wavelength)
+area_blue = np.trapz(bb_blue, wavelength)
+area_green = np.trapz(bb_green, wavelength)
+
+# Define slice regions for blackbody reference
+mask_blue_slice = (wavelength >= center_blue - width_blue) & (wavelength <= center_blue + width_blue)
+mask_green_slice = (wavelength >= center_green - width_green) & (wavelength <= center_green + width_green)
+
+# Compute areas under blackbody curve in slices
+area_bb_blue = np.trapz(intensity[mask_blue_slice], wavelength[mask_blue_slice])
+area_bb_green = np.trapz(intensity[mask_green_slice], wavelength[mask_green_slice])
+
+# Compute scale factors
+scale_blue = area_bb_blue / area_blue
+scale_green = area_bb_green / area_green
+# Plot results
+plt.figure(figsize=(10, 6))
+
+plt.plot(wavelength, green_ideal, color='darkgreen', linestyle='dotted', label="Green Ideal")
+plt.plot(wavelength, blue_ideal, color='darkblue', linestyle='dotted', label="Blue Ideal")
+plt.plot(wavelength, red_ideal, color='crimson', linestyle='dotted', label="Red Ideal")
+
+plt.plot(wavelength, intensity, color='black', label="Blackbody Spectrum")
+
+plt.plot(wavelength, bb_red, color='red', label=f"Red Filtered BB (Scaling = 1.0000)")  # Red area is reference
+plt.fill_between(wavelength[mask_blue_slice], intensity[mask_blue_slice], color='blue', alpha=0.2, label=f"Blue BB Slice (Scaling = {scale_blue})")
+plt.fill_between(wavelength[mask_green_slice], intensity[mask_green_slice], color='green', alpha=0.2, label=f"Green BB Slice (Scaling = {scale_green})")
+
+plt.xlabel("Wavelength (nm)")
+plt.ylabel("Relative Intensity")
+plt.title("Blackbody Spectrum with Scaled Filtered Intensities")
+plt.legend()
+plt.grid()
+plt.show()
+#%%
+# Scaling Factors (inverse of normalized areas)
+scaling_factors = {
+    "red": 1,  # Reference
+    "blue": scale_blue,
+    "green": scale_green,
+}
+
+# Apply scaling to thermopile intensity readings
+for color in ["red", "green", "blue"]:
+    data = eval(f"{color}_data")  # Load the dataset dynamically
+    data["Watts/m² (scaled)"] = data["Watts/m²"] * scaling_factors[color]  # Scale intensities
+
+    # Compute optical depth using scaled intensity
+    data[f"tau_{color}"] = -np.log(data["Watts/m² (scaled)"] / I0[color])
+    data[f"tau_a_{color}"] = data[f"tau_{color}"] - tau_R[color] 
+
+    # Compute Uncertainty in Optical Depth
+    data[f"uncert_tau_{color}"] = np.abs(data[f"tau_{color}"] * uncertainties_wavelengths[color] / effective_wavelengths[color])
+
+    # Save the corrected dataset
+    data.to_csv(f"processed_{color}_filtered_data_scaled.csv", index=False)
+
+print("Thermopile readings successfully scaled to account for filter attenuation.")
+
+#%%
+
+plt.figure(figsize=(12, 6))
+plt.plot(time_hoursb, blue_data["Watts/m²"] * scaling_factors["blue"], label="Blue Filter (Scaled)", color="blue", linestyle="dashed")
+plt.fill_between(time_hoursb, (blue_data["Watts/m²"]* scaling_factors["blue"]) - 1.44, (blue_data["Watts/m²"]* scaling_factors["blue"]) + 1.44, color='blue', alpha=0.2)
+plt.plot(time_hoursg, green_data["Watts/m²"] * scaling_factors["green"], label="Green Filter (Scaled)", color="green", linestyle="dashed")
+plt.fill_between(time_hoursg, (green_data["Watts/m²"]*scaling_factors["green"]) - 1.44, (green_data["Watts/m²"]*scaling_factors["green"]) + 1.44, color='green', alpha=0.2)
+plt.plot(time_hoursg, red_data["Watts/m²"] * scaling_factors["red"], label="Red Filter (Scaled)", color="red", linestyle="dashed")
+plt.fill_between(time_hoursg, red_data["Watts/m²"] - 1.44, red_data["Watts/m²"] + 1.44, color='red', alpha=0.2)
+plt.xlabel("Time (Hours)")
+plt.ylabel("Scaled Light Intensity (Watts/m²)")
+
+
+plt.legend()
+plt.grid()
+plt.show()
+
+#%%
+
+scaledred = red_data["Watts/m²"] * scaling_factors["red"]
+scaledgreen = green_data["Watts/m²"] * scaling_factors["green"]
+scaledblue = blue_data["Watts/m²"] * scaling_factors["blue"]
+
+
+import numpy as np
+import matplotlib.pyplot as plt
+from pysolar.solar import get_altitude
+import datetime
+import pytz
+import math
+
+
+# Define uncertainty
+
+#time_hours = time in hours
+
+# Function to calculate solar radiation and zenith angle
+def calculate_daily_solar_radiation_gmt(latitude, longitude, date):
+    """
+    Calculate the direct solar radiation and zenith angle for every hour of the day in GMT.
+    
+    Returns:
+        tuple: Hours (GMT), solar radiation (W/m²), zenith angles, and irradiance values.
+    """
+    hours_gmt = []
+    radiation_values = []
+    zenith_angles = []
+    irradiance_values = []
+
+    utc = pytz.utc  # UTC timezone
+    gmt = pytz.timezone("Etc/GMT")  # GMT timezone
+
+    for hour in range(24):
+        # Create a datetime object in UTC
+        utc_time = utc.localize(datetime.datetime(date.year, date.month, date.day, hour, 0, 0))
+        
+        # Convert UTC to GMT (explicitly, even though they are equivalent)
+        gmt_time = utc_time.astimezone(gmt)
+        
+        # Calculate solar altitude and zenith angle
+        altitude = get_altitude(latitude, longitude, utc_time)
+        zenith_angle = 90 - altitude if altitude > 0 else 90
+        
+        # Calculate irradiance (if the sun is above the horizon)
+        irradiance = 1360 * math.cos(math.radians(zenith_angle)) if altitude > 0 else 0
+        
+        # Append data
+        hours_gmt.append(gmt_time.hour + gmt_time.minute / 60.0)  # Fractional hours
+        radiation_values.append(irradiance)
+        zenith_angles.append(zenith_angle)
+        irradiance_values.append(irradiance)
+
+    return hours_gmt, radiation_values, zenith_angles, irradiance_values
+
+# Set location and date
+latitude = 51.4941  # South Kensington latitude
+longitude = -0.1735  # South Kensington longitude
+date = datetime.date(2025, 2, 2)  # Specific date
+
+# Get solar radiation, zenith angle, and irradiance values
+hours_gmt, _, zenith_angles, irradiance_values = calculate_daily_solar_radiation_gmt(latitude, longitude, date)
+
+# Interpolate irradiance values to match dataset time points
+irradiance_interpg = np.interp(time_hoursg, hours_gmt, irradiance_values)
+irradiance_interpb = np.interp(time_hoursb, hours_gmt, irradiance_values)
+
+# Compute transmissivity
+transmissivity_red = scaledred / irradiance_interpg
+transmissivity_blue = scaledblue / irradiance_interpb
+transmissivity_green = scaledgreen / irradiance_interpg
+
+# Compute optical depth (delta = -ln(transmissivity))
+optical_depth_red = -np.log(transmissivity_red)
+optical_depth_blue = -np.log(transmissivity_blue)
+optical_depth_green = -np.log(transmissivity_green)
+
+
+# Plot optical depth
+plt.figure(figsize=(10, 6))
+plt.plot(time_hoursb, optical_depth_blue, label="Optical Depth  Blue Filter", markersize=3, color='blue')
+plt.fill_between(time_hoursb, (optical_depth_blue - np.log(0.44)), optical_depth_blue + np.log(0.44), color='blue', alpha=0.2)
+plt.plot(time_hoursg, optical_depth_red, label="Optical Depth  Red Filter", markersize=3, color='red')
+plt.fill_between(time_hoursg, optical_depth_red - np.log(0.44), optical_depth_red + np.log(0.44), color='red', alpha=0.2)
+plt.plot(time_hoursg, optical_depth_green, label="Optical Depth  Green Filter", markersize=3, color='green')
+plt.fill_between(time_hoursg, optical_depth_green - np.log(0.44), optical_depth_green + np.log(0.44), color='green', alpha=0.2)
+
+
+# Labels and title
+plt.xlabel("Time (Hours)", fontsize=12)
+plt.ylabel("Optical Depth", fontsize=12)
+
+# Grid, legend, and display
+plt.grid(True, linestyle='--', alpha=0.6)
+plt.legend(fontsize=10)
+plt.ylim(0,5)
+#plt.ylim(2,5)
+#plt.ylim(0, np.max([np.max(optical_depth_johndata), np.max(optical_depth_datalong)]) * 1.2)  # Adjust range for visibility
+
+plt.show()
+
+average_optical_depth_red = np.mean(optical_depth_red)
+average_optical_depth_blue = np.mean(optical_depth_blue)
+average_optical_depth_green = np.mean(optical_depth_green)
+
+
+# Print the average values
+print(f"Average Optical Depth for Green Filter: {average_optical_depth_green:.4f}")
+print(f"Average Optical Depth for Red Filter: {average_optical_depth_red:.4f}")
+print(f"Average Optical Depth for Blue Filter: {average_optical_depth_blue:.4f}")
+#%%
+import datetime
+import time
+import math
+import pytz
+import matplotlib.pyplot as plt
+from pysolar.solar import get_altitude
+
+# Define London coordinates
+LATITUDE = 51.5074  # London latitude
+LONGITUDE = -0.1278  # London longitude
+
+# Define Rayleigh Optical Depth function
+def rayleigh_optical_depth(wavelength):
+    """Compute Rayleigh optical depth for a given wavelength (in micrometers)."""
+    return 0.008735 / (wavelength ** 4.08)
+
+# Define air mass function
+def air_mass(zenith_angle):
+    """Calculate air mass based on solar zenith angle."""
+    if zenith_angle >= 90:
+        return float('inf')  # Sun below horizon
+    return 1 / (math.cos(math.radians(zenith_angle)) + 0.50572 * (96.07995 - zenith_angle) ** -1.6364)
+
+# Wavelengths in micrometers
+wavelengths = [0.43717, 0.55068, 0.670]
+tau_R = {wavelength: rayleigh_optical_depth(wavelength) for wavelength in wavelengths}
+
+# Set timezone to UTC
+utc = pytz.utc
+
+# Define start and end times in UTC (timezone-aware)
+start_time = utc.localize(datetime.datetime(2025, 2, 2, 13, 53, 0))  
+end_time = utc.localize(datetime.datetime(2025, 2, 2, 16, 50, 0))
+
+# Lists to store data for plotting
+times = []
+tau_450 = []
+tau_550 = []
+tau_700 = []
+
+# Start looping every second
+current_time = start_time
+while current_time <= end_time:
+    # Compute solar altitude and zenith angle
+    altitude = get_altitude(LATITUDE, LONGITUDE, current_time)
+    zenith_angle = 90 - altitude  # Zenith angle is complementary to altitude
+
+    # Compute air mass
+    m = air_mass(zenith_angle)
+
+    # Compute effective Rayleigh Optical Depth for each wavelength
+    effective_tau = {wavelength: tau_R[wavelength] * m for wavelength in wavelengths}
+
+    # Store values for plotting
+    times.append(current_time)
+    tau_450.append(effective_tau[0.43717])
+    tau_550.append(effective_tau[0.55068])
+    tau_700.append(effective_tau[0.670])
+
+    # Increment time by 1 second
+    current_time += datetime.timedelta(seconds=1)
+
+# Plot the results
+plt.figure(figsize=(10, 5))
+plt.plot(times, tau_450, label='437.17 nm (Blue)', color='blue')
+plt.plot(times, tau_550, label='550.068 nm (Green)', color='green')
+plt.plot(times, tau_700, label='670 nm (Red)', color='red')
+
+# Formatting the plot
+plt.xlabel("Time (Hours)")
+plt.ylabel("Rayleigh Optical Depth")
+
+plt.legend()
+#plt.xticks(rotation=45)  # Rotate time labels for better readability
+plt.grid(True)
+
+# Show the plot
+plt.show()
+
+#%%
+def datetime_to_decimal_hours(dt):
+    """Convert datetime object to decimal hours."""
+    return dt.hour + dt.minute / 60 + dt.second / 3600
+
+# Convert 'times' to decimal hours
+times_decimal = [datetime_to_decimal_hours(t) for t in times]
+
+# Now, 'time_hoursg' and 'time_hoursr' are in decimal hours, assuming 'green_data["Seconds"]' are provided
+# and you want to interpolate them to get the optical depth values (tau_450, tau_550, tau_700)
+
+# Interpolate the tau values to the times in decimal hours
+rayleigh_interpb_450 = np.interp(time_hoursb, times_decimal, tau_450)
+rayleigh_interpg_550 = np.interp(time_hoursg, times_decimal, tau_550)
+rayleigh_interpg_700 = np.interp(time_hoursg, times_decimal, tau_700)
+#%%
+
+aerosol_optical_depth_red = optical_depth_red - rayleigh_interpg_700
+aerosol_optical_depth_blue = optical_depth_blue - rayleigh_interpb_450
+aerosol_optical_depth_green = optical_depth_green - rayleigh_interpg_550
+
+# Plotting aerosol optical depth for each color band
+plt.plot(time_hoursg, aerosol_optical_depth_red, color="red", label="Red (700 nm)", linewidth=2)
+plt.plot(time_hoursg, aerosol_optical_depth_green, color="darkgreen", label="Green (550 nm)", linewidth=2)
+plt.plot(time_hoursb, aerosol_optical_depth_blue, color="darkblue", label="Blue(450 nm)", linewidth=2)
+
+
+
+
+# Adding labels and title
+plt.xlabel('Time (Hours)', fontsize=12)
+plt.ylabel('Aerosol Optical Depth', fontsize=12)
+plt.title('Aerosol Optical Depth vs Time', fontsize=14)
+plt.ylim(0,4)
+# Adding grid for better visibility
+plt.grid(True)
+
+# Adding legend
+plt.legend()
+
+# Show the plot
+plt.tight_layout()
+plt.show()
+#%%
+
+
+#%%
+#plot ln(optical depth) = ln(turbidity) - angstrom(ln(wavelength))
+#red": 670, "green": 550.06, "blue": 437.71}
+#red = ln(670), green = ln()
+
+#x = ln(lambda)
+#y = ln(optical depth)
+
+x = np.array([math.log(670*1e-3), math.log(550.06*1e-3), math.log(437.71*1e-3)])
+y = np.array([math.log(np.mean(aerosol_optical_depth_red)), math.log(np.mean(aerosol_optical_depth_green)), math.log(np.mean(aerosol_optical_depth_blue))])
+
+#import math UNSCALED
+#Average Optical Depth for Green Filter: 2.6944
+#Average Optical Depth for Red Filter: 3.0514
+#Average Optical Depth for Blue Filter: 2.1456
+
+#x = np.array([-14.21598812, -14.41323847, -14.64170925])
+#y = np.array([1.115600502, 0.9911755451, 0.763412335])
+
+#SCALED
+#Average Optical Depth for Green Filter: -0.0877
+#Average Optical Depth for Red Filter: 3.0514
+#Average Optical Depth for Blue Filter: 0.2729
+
+#x = np.array([-14.21598812, -14.64170925])
+#y = np.array([1.115600502, -1.2986])
+
+m, c = np.polyfit(x,y,1)
+print(f"Gradient: {m}")
+print(f"Y-intercept: {c}")
+# Extract Ångström parameters
+angstrom_exponent = -m  # α = -gradient
+turbidity_factor = np.exp(c)  # β = e^(intercept)
+
+# Print results
+print(f"Ångström Exponent (α): {angstrom_exponent:.4f}")
+print(f"Turbidity Factor (β): {turbidity_factor:.4f}")
+
+# Plot the data and the linear fit
+plt.scatter(x,y, label="Data", color="blue")
+plt.plot(x, m * x + c, label=f"Fit: y = {m:.4f}x + {c:.4f}", color="red")
+
+# Annotate the parameters on the plot
+plt.text(min(x), max(y) - 0.1, f"Ångström Coefficient: {-m:.4f}", fontsize=10, color="black")
+plt.text(min(x), max(y) - 0.13, f"Turbidity: {turbidity_factor:.4f}", fontsize=10, color="black")
+
+plt.xlabel("ln(Wavelength) (ln λ)")
+plt.ylabel("ln(Optical Depth) (ln τ)")
+plt.title("Ångström Law Fit")
+plt.legend()
+plt.grid()
+plt.show()
+
+#%%
+#plot ln(optical depth) = ln(turbidity) - angstrom(ln(wavelength))
+#red": 670, "green": 550.06, "blue": 437.71}
+#red = ln(670), green = ln()
+
+#x = ln(lambda)
+#y = ln(optical depth)
+
+x = np.array([math.log(670*1e-3), math.log(550.06*1e-3), math.log(437.71*1e-3)])
+log_y_blue = np.log(aerosol_optical_depth_red)  # Taking log for each element in the red optical depth array
+log_y_green = np.log(aerosol_optical_depth_green)  # Taking log for each element in the green optical depth array
+log_y_red = np.log(aerosol_optical_depth_blue)  # Taking log for each element in the blue optical depth array
+y = np.array([log_y_red,log_y_green,log_y_blue]).T
+#import math UNSCALED
+#Average Optical Depth for Green Filter: 2.6944
+#Average Optical Depth for Red Filter: 3.0514
+#Average Optical Depth for Blue Filter: 2.1456
+
+#x = np.array([-14.21598812, -14.41323847, -14.64170925])
+#y = np.array([1.115600502, 0.9911755451, 0.763412335])
+
+#SCALED
+#Average Optical Depth for Green Filter: -0.0877
+#Average Optical Depth for Red Filter: 3.0514
+#Average Optical Depth for Blue Filter: 0.2729
+
+#x = np.array([-14.21598812, -14.64170925])
+#y = np.array([1.115600502, -1.2986])
+angstroms=[]
+turbidities=[]
+for i in y:
+    m, c = np.polyfit(x,i,1)
+    angstroms.append(-m)
+    turbidities.append(np.exp(c))
+
+# Create subplots: one row, two columns
+fig, ax = plt.subplots(1, 2, figsize=(12, 6))
+
+# Plot Angström exponents on the first subplot
+ax[0].plot(time_hoursg, angstroms, color="black", linewidth=2)
+#ax[0].set_title(f'Angström Exponent vs Time (mean = {np.mean(angstroms):.2f})', fontsize=14)
+ax[0].set_xlabel('Time (Hours)', fontsize=12)
+ax[0].set_ylabel('Angström Exponent', fontsize=12)
+ax[0].grid(True)
+
+# Plot Turbidity on the second subplot
+ax[1].plot(time_hoursg, turbidities, color="black", linewidth=2)
+#ax[1].set_title(f'Turbidity vs Time (mean = {np.mean(turbidities):.2f})', fontsize=14)
+ax[1].set_xlabel('Time (Hours)', fontsize=12)
+ax[1].set_ylabel('Turbidity', fontsize=12)
+ax[1].grid(True)
+print(f'Turbidity vs Time (mean = {np.mean(turbidities):.6f})')
+print(f'Angström Exponent vs Time (mean = {np.mean(angstroms):.6f})')
+# Adjust layout to make sure labels and titles are clear
+plt.tight_layout()
+
+# Show the plot
+plt.show()
+
