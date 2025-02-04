@@ -587,10 +587,9 @@ aerosol_optical_depth_green = optical_depth_green - rayleigh_interpg_550
 def ray_unc(upper,lower):
     return (upper+lower)/2
 
-uncertainty_700 = uncertainty_total_700 - ray_unc(tau_700_upper,tau_700_lower)
-uncertainty_450 = uncertainty_total_450 - ray_unc(tau_450_upper,tau_450_lower)
-uncertainty_550 = uncertainty_total_550 - ray_unc(tau_550_upper,tau_550_lower)
-
+uncertainty_450 = uncertainty_total_450 + ray_unc(tau_450_upper,tau_450_lower)
+uncertainty_550 = uncertainty_total_550 + ray_unc(tau_550_upper,tau_550_lower)
+uncertainty_700 = uncertainty_total_700 + ray_unc(tau_700_upper,tau_700_lower)
 
 # Plotting aerosol optical depth for each color band
 plt.plot(time_hoursg, aerosol_optical_depth_red, color="red", label="Red (700 nm)", linewidth=2)
