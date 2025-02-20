@@ -1,0 +1,106 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import curve_fit
+
+# Load the data
+file_path = 'C:/Users/henry/Documents/LAB E2/planck3.txt'  # Update with your actual file path
+
+def moving_average(data, window_size=3):
+    return np.convolve(data, np.ones(window_size)/window_size, mode='same')
+
+data = np.loadtxt(file_path, skiprows=1)  # Skipping header row
+
+# Extract angles and intensity data
+angles = data[:, 0]
+voltages = [18, 35, 24, 29.5, 21]  # kV
+intensities = data[:, 1:]
+
+x_intercepts = []
+d_spacing = 2.82e-10  # Example d-spacing in meters (update as needed)
+
+plt.figure(figsize=(10, 6))
+
+for i, voltage in enumerate(voltages):
+    intensity = intensities[:, i]
+    plt.plot(angles, intensity, label=f'{voltage} kV')
+    
+    # Identify the start of a pronounced rise (ignoring flat region)
+    gradient = np.gradient(intensity)
+    smoothed_gradient = moving_average(gradient, window_size=5)  # Smooth the gradient
+    
+    # Dynamically adjust threshold for small slopes
+    dynamic_threshold = 0.1 * np.max(smoothed_gradient) if voltage > 21 else 0.02 * np.max(smoothed_gradient)
+    valid_indices = np.where(smoothed_gradient > dynamic_threshold)[0]
+    
+    if len(valid_indices) > 5:  # Ensure enough points for a reliable fit
+        # Find the first sustained rise over multiple points
+        for j in range(len(valid_indices) - 3):
+            if all(smoothed_gradient[valid_indices[j:j+3]] > dynamic_threshold):
+                start_index = valid_indices[j]
+                break
+        else:
+            start_index = valid_indices[0]
+        
+        # Select range for fitting, stopping before peak
+        peak_index = np.argmax(intensity)
+        end_index = min(peak_index, start_index + (15 if voltage <= 21 else 10))  # Extend fit range for small slopes
+        rising_angles = angles[start_index:end_index]
+        rising_intensity = intensity[start_index:end_index]
+        
+        if len(rising_angles) > 2:  # Ensure at least 2 points for curve fitting
+            # Perform polynomial fit
+            poly_coeffs = np.polyfit(rising_angles, rising_intensity, 1)  # Linear fit (1st-degree polynomial)
+            poly_fit = np.poly1d(poly_coeffs)
+            
+            # Compute x-intercept (angle where intensity = 0)
+            x_intercept = -poly_coeffs[1] / poly_coeffs[0]
+            x_intercepts.append(x_intercept)
+            
+            # Plot polynomial fit
+            fit_y = poly_fit(rising_angles)
+            plt.plot(rising_angles, fit_y, '--', label=f'Fit {voltage} kV')
+
+plt.xlabel('Angle (degrees)')
+plt.ylabel('Intensity (counts/sec)')
+plt.yscale('log')  # Set y-axis to logarithmic scale
+plt.legend()
+plt.title('Bremsstrahlung Spectra')
+plt.show()
+
+# Ensure correct ordering of extracted values
+sorted_indices = np.argsort(voltages)
+voltages = np.array(voltages)[sorted_indices]
+x_intercepts = np.array(x_intercepts)[sorted_indices]
+
+electron_charge = 1.602e-19  # Coulombs
+speed_of_light = 3.00e8  # m/s
+
+# Compute minimum wavelength and energy
+wavelengths = [2 * d_spacing * np.sin(np.radians(theta)) for theta in x_intercepts]
+energies = [v * 1e3 * electron_charge for v in voltages]
+reciprocal_energies = [1 / E for E in energies]  # Compute 1/Energy
+
+# Plot 1/Energy vs Minimum Wavelength
+plt.figure(figsize=(8, 5))
+plt.scatter(wavelengths, reciprocal_energies, color='red', label='Data Points')
+
+# Perform linear fit
+fit_coeffs = np.polyfit(wavelengths, reciprocal_energies, 1)
+fit_line = np.poly1d(fit_coeffs)
+wavelength_range = np.linspace(min(wavelengths), max(wavelengths), 100)
+plt.plot(wavelength_range, fit_line(wavelength_range), '--', label='Linear Fit')
+
+plt.xlabel('Minimum Wavelength (m)')
+plt.ylabel('1 / Energy (1/J)')
+plt.title('1/Energy vs Minimum Wavelength')
+plt.legend()
+plt.show()
+
+plancks_constant = 1 / (fit_coeffs[0] * speed_of_light)
+
+print(f'Estimated Planck\'s Constant: {plancks_constant:.2e} Js')
+
+# Print results
+for i, voltage in enumerate(voltages):
+    print(f'{voltage} kV: X-intercept = {x_intercepts[i]:.2f} degrees, ' 
+          f'Min Wavelength = {wavelengths[i]:.2e} m, Energy = {energies[i]:.2f} J')
