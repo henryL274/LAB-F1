@@ -1,0 +1,452 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Feb 19 08:32:16 2025
+
+@author: hannanasir
+"""
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.stats import linregress
+from scipy.ndimage import gaussian_filter1d
+# Constants
+
+
+# Load dataset
+data = pd.read_csv("/Users/hannanasir/Desktop/plancksbestfit.txt", delimiter="\t")
+
+# Extract wavelengths
+wavelengths = data.iloc[:, 0]  # First column is wavelength
+
+# Find lambda_min for each voltage column
+lambda_mins = {}
+for col in data.columns[1:]:  # Exclude first column (wavelengths)
+    intensity = data[col]
+    lambda_min = wavelengths[intensity > 2].min()  # First nonzero intensity
+    lambda_mins[col] = lambda_min
+
+# Convert to DataFrame
+lambda_min_df = pd.DataFrame(list(lambda_mins.items()), columns=["Voltage", "Lambda_min"])
+lambda_min_df["Voltage"] = lambda_min_df["Voltage"].str.extract(r'(\d+)').astype(float)  # Extract voltage values
+
+# Compute 1/U
+lambda_min_df["1/U"] = 1 / lambda_min_df["Voltage"]
+
+# Perform linear regression
+slope, intercept, r_value, p_value, std_err = linregress(lambda_min_df["1/U"], lambda_min_df["Lambda_min"])
+
+# Calculate Planck's constant from slope
+h_calculated = slope * e / c
+
+# Plot results
+plt.scatter(lambda_min_df["1/U"], lambda_min_df["Lambda_min"], label="Data")
+plt.plot(lambda_min_df["1/U"], slope * lambda_min_df["1/U"] + intercept, 'r', label=f'Fit: h = {h_calculated:.3e} Js')
+plt.xlabel("1/U (1/kV)")
+plt.ylabel("Lambda_min (nm)")
+plt.legend()
+plt.title("Duane-Hunt Law: Determining Planck's Constant")
+plt.show()
+
+# Output results
+print(f"Calculated Planck's Constant: {h_calculated:.3e} Js")
+print(f"R-squared: {r_value**2:.3f}")
+
+
+# Function to detect linear regions while ignoring zero intensity values
+def find_linear_region(wavelengths, intensities):
+    nonzero_mask = intensities > 4.5  # Ignore zero regions
+    filtered_wavelengths = wavelengths[nonzero_mask]
+    filtered_intensities = intensities[nonzero_mask]
+    
+    smoothed = gaussian_filter1d(filtered_intensities, sigma=2)  # Smooth data
+    deriv = np.gradient(smoothed, filtered_wavelengths)  # Compute first derivative
+    abs_deriv = np.abs(deriv)
+    mask = abs_deriv < np.percentile(abs_deriv, 50)  # Select stable regions
+    return filtered_wavelengths[mask], filtered_intensities[mask]
+
+# Plot R against Lambda for all voltages with detected linear fits
+plt.figure(figsize=(8,6))
+for col in data.columns[1:]:  # Iterate over all voltage columns
+    plt.plot(wavelengths, data[col], label=col)
+    
+    # Automatically detect the linear region while ignoring zeros
+    lin_wavelengths, lin_intensities = find_linear_region(wavelengths, data[col])
+    if len(lin_wavelengths) > 2:
+        slope, intercept, _, _, _ = linregress(lin_wavelengths, lin_intensities)
+        plt.plot(lin_wavelengths, slope * lin_wavelengths + intercept, '--', label=f'Best Fit {col}')
+
+plt.xlabel("Wavelength (nm)")
+plt.ylabel("Intensity (R)")
+plt.title("Intensity vs Wavelength for Different Voltages with Auto-Detected Best Fit Lines (Ignoring Zero Regions)")
+plt.legend()
+plt.show()
+
+
+#%%
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Feb 19 08:32:16 2025
+
+@author: hannanasir
+"""
+
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.stats import linregress
+from scipy.ndimage import gaussian_filter1d
+
+# =============================================================================
+# Constants
+# =============================================================================
+c = 3.00e8          # Speed of light in m/s
+e = 1.602e-19       # Elementary charge in C
+
+# =============================================================================
+# Load Dataset
+# =============================================================================
+# Debug: Print path to confirm correct file location
+data_path = "/Users/hannanasir/Desktop/plancksbestfit.txt"
+print(f"[DEBUG] Loading dataset from: {os.path.abspath(data_path)}")
+
+# The dataset is assumed to be a tab-delimited text file.
+data = pd.read_csv(data_path, delimiter="\t")
+
+# Debug: Print the first few rows of the dataset
+print("[DEBUG] Dataset head:")
+print(data.head())
+
+# =============================================================================
+# Extract Wavelengths (First Column)
+# =============================================================================
+wavelengths = data.iloc[:, 0]
+
+# Debug: Show wavelength range
+print(f"[DEBUG] Wavelength range: min={wavelengths.min()}, max={wavelengths.max()}")
+
+# =============================================================================
+# Find λ_min for Each Voltage Column
+# =============================================================================
+# We'll define 'λ_min' as the first wavelength above an intensity threshold (> 2).
+lambda_mins = {}
+for col in data.columns[1:]:
+    intensity = data[col]
+    # Only consider wavelengths where the intensity is above a threshold
+    lambda_min = wavelengths[intensity > 2].min()
+    lambda_mins[col] = lambda_min
+
+# Convert the lambda_min dictionary to a DataFrame for further analysis.
+lambda_min_df = pd.DataFrame(list(lambda_mins.items()), columns=["Voltage", "Lambda_min"])
+
+# Extract numeric voltage values from the column names using regex and convert to float.
+lambda_min_df["Voltage"] = lambda_min_df["Voltage"].str.extract(r'(\d+)').astype(float)
+
+# Compute 1/U
+lambda_min_df["1/U"] = 1 / lambda_min_df["Voltage"]
+
+# Debug: Print the λ_min data
+print("[DEBUG] Lambda_min DataFrame:")
+print(lambda_min_df)
+
+# =============================================================================
+# Duane-Hunt Law Linear Regression
+# =============================================================================
+# Perform linear regression on (λ_min vs. 1/U).
+slope, intercept, r_value, p_value, std_err = linregress(
+    lambda_min_df["1/U"], 
+    lambda_min_df["Lambda_min"]
+)
+
+# Calculate Planck's constant from the slope
+h_calculated = slope * e / c
+
+# Debug: Print the intermediate results
+print("[DEBUG] Duane-Hunt Fit Results:")
+print(f"        slope    = {slope:.5f}")
+print(f"        intercept= {intercept:.5f}")
+print(f"        r_value  = {r_value:.5f}")
+print(f"        p_value  = {p_value:.5f}")
+print(f"        std_err  = {std_err:.5f}")
+print(f"        h_calc   = {h_calculated:.3e} Js")
+
+# =============================================================================
+# Plot: λ_min vs. 1/U
+# =============================================================================
+plt.figure()
+plt.scatter(lambda_min_df["1/U"], lambda_min_df["Lambda_min"], label="Data Points")
+plt.plot(lambda_min_df["1/U"], slope * lambda_min_df["1/U"] + intercept, 'r',
+         label=f'Fit: h = {h_calculated:.3e} Js')
+plt.xlabel("1/U (1/kV)")
+plt.ylabel("Lambda_min (nm)")
+# plt.legend()  # <<--- COMMENTED OUT LEGEND PER REQUEST
+plt.title("Duane-Hunt Law: Determining Planck's Constant")
+plt.show()
+
+print(f"Calculated Planck's Constant: {h_calculated:.3e} Js")
+print(f"R-squared: {r_value**2:.3f}")
+
+# =============================================================================
+# Detect the Rising Edge and Perform Linear Fit for Each Voltage
+# =============================================================================
+def find_rising_edge(wavelengths, intensities, intensity_threshold=4.5):
+    """
+    Find the rising edge of the data where:
+      1. Intensity is above 'intensity_threshold'.
+      2. The derivative is positive.
+    Returns arrays of the wavelengths and intensities for that region.
+    """
+    # 1) Filter out intensities below threshold
+    above_threshold = intensities > intensity_threshold
+    
+    # 2) We'll smooth the data to reduce noise
+    smoothed = gaussian_filter1d(intensities, sigma=2)
+    
+    # 3) Compute derivative
+    deriv = np.gradient(smoothed, wavelengths)
+    
+    # 4) We only want the positive slope region
+    positive_slope = deriv > 0
+    
+    # Combine the two masks
+    combined_mask = above_threshold & positive_slope
+    
+    # Return the filtered data
+    return wavelengths[combined_mask], intensities[combined_mask]
+
+# Dictionary to store linear fit parameters
+fit_params = {}
+
+# =============================================================================
+# Plot All Data and the Rising-Edge Fits
+# =============================================================================
+plt.figure(figsize=(10, 8))
+
+for col in data.columns[1:]:
+    # Plot the raw intensity vs. wavelength data
+    plt.plot(wavelengths, data[col], label=col)
+    
+    # Identify the rising edge
+    lin_wavelengths, lin_intensities = find_rising_edge(wavelengths, data[col], intensity_threshold=4.5)
+    
+    # Debug: Print how many points were found in the rising edge
+    print(f"[DEBUG] Column: {col}, rising-edge points found: {len(lin_wavelengths)}")
+    
+    if len(lin_wavelengths) > 2:
+        # Construct the design matrix for linear least squares: [x, 1]
+        A = np.vstack([lin_wavelengths, np.ones_like(lin_wavelengths)]).T
+        
+        # Solve for slope (m) and intercept (b) using np.linalg.lstsq
+        params, residuals, rank, s = np.linalg.lstsq(A, lin_intensities, rcond=None)
+        slope_fit, intercept_fit = params
+        
+        # We'll only proceed if slope_fit is positive (as requested)
+        if slope_fit > 0:
+            # Debug: Print the slope, intercept, and residual info
+            print(f"[DEBUG]  -> slope={slope_fit:.4f}, intercept={intercept_fit:.4f}, residual={residuals}")
+            
+            # Save fit params
+            fit_params[col] = (slope_fit, intercept_fit)
+            
+            # Extrapolate the fit line to show x- and y-intercepts
+            # We'll define a domain from 0 up to the max wavelength for clarity
+            x_fit = np.linspace(0, wavelengths.max(), 200)
+            y_fit = slope_fit * x_fit + intercept_fit
+            
+            # Plot the fit line
+            plt.plot(x_fit, y_fit, '--', label=f'Linear Fit {col}')
+            
+            # Optional: Show intercept points on the plot
+            # X-intercept is at y=0 => x=-b/m (if it’s within the domain)
+            if slope_fit != 0:
+                x_int = -intercept_fit / slope_fit
+                y_int = intercept_fit  # y-intercept at x=0
+                
+                # Debug intercepts
+                print(f"[DEBUG]  -> x-intercept={x_int:.3f}, y-intercept={y_int:.3f}")
+        #else:
+            #print(f\"[DEBUG]  -> Slope is not positive, ignoring fit for {col}.\")
+    #else:
+        #print(f\"[DEBUG]  -> Not enough points to fit for {col}.\")
+        
+# plt.legend()  # <<--- COMMENTED OUT LEGEND PER REQUEST
+plt.xlabel("Wavelength (nm)")
+plt.ylabel("Intensity (R)")
+plt.title("Intensity vs. Wavelength for Different Voltages\nwith Rising-Edge Linear Fits")
+plt.show()
+
+# =============================================================================
+# Save Linear Fit Parameters to a Text File
+# =============================================================================
+fit_df = pd.DataFrame(
+    [(voltage, slope_int[0], slope_int[1]) for voltage, slope_int in fit_params.items()],
+    columns=["Voltage", "Slope", "Intercept"]
+)
+
+out_file = "linear_fit_parameters.txt"
+fit_df.to_csv(out_file, sep="\t", index=False)
+
+# Print out the full path of the saved text file
+full_path = os.path.abspath(out_file)
+#print(f\"[DEBUG] Linear fit parameters saved to: {full_path}\")
+#print(\"[DEBUG] Fit DataFrame:\")
+print(fit_df)
+
+
+
+
+
+#%%
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+data = pd.read_csv("/Users/hannanasir/Desktop/plancksbestfit.txt", delimiter="\t")
+
+
+
+# Extract wavelengths
+wavelengths = data.iloc[:, 0]  # First column is wavelength
+V22 = data.iloc[:, 1]
+V24 = data.iloc[:, 2]
+V26 = data.iloc[:, 3]
+V28 = data.iloc[:, 4]
+V30 = data.iloc[:, 5]
+V32 = data.iloc[:, 6]
+V34 = data.iloc[:, 7]
+V35 = data.iloc[:, 8]
+V33 = data.iloc[:, 9]
+V31 = data.iloc[:, 10]
+V29 = data.iloc[:, 11]
+V27 = data.iloc[:, 12]
+V25 = data.iloc[:, 13]
+V23 = data.iloc[:, 14]
+plt.plot(wavelengths, V22)
+plt.plot(wavelengths, V24)
+plt.plot(wavelengths, V26)
+plt.plot(wavelengths, V28)
+plt.plot(wavelengths, V30)
+plt.plot(wavelengths, V32)
+plt.plot(wavelengths, V34)
+plt.plot(wavelengths, V35)
+plt.plot(wavelengths, V33)
+plt.plot(wavelengths, V31)
+plt.plot(wavelengths, V29)
+plt.plot(wavelengths, V27)
+plt.plot(wavelengths, V25)
+plt.plot(wavelengths, V23)
+
+
+    
+#%%
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# Load data
+data = pd.read_csv("/Users/hannanasir/Desktop/plancksbestfit.txt", delimiter="\t")
+
+wavelengths = data.iloc[:, 0]
+V22 = data.iloc[:, 1]
+
+plt.plot(wavelengths, V22, label="V22")
+
+# Define your bounds
+lower_bound, upper_bound = 2, 83.7
+mask = (V22 >= lower_bound) & (V22 <= upper_bound)
+
+x_subset = wavelengths[mask]
+y_subset = V22[mask]
+
+# Remove NaN/Inf
+finite_mask = np.isfinite(x_subset) & np.isfinite(y_subset)
+x_subset = x_subset[finite_mask]
+y_subset = y_subset[finite_mask]
+
+# Check we have enough points
+if len(x_subset) < 2:
+    print("Not enough valid points to perform a linear fit.")
+else:
+    # np.polyfit or np.linalg.lstsq
+    m, c = np.polyfit(x_subset, y_subset, 1)
+    print(f"Fitted slope: {m}, intercept: {c}")
+
+    # Plot best-fit line in the same region
+    plt.plot(x_subset, m*x_subset + c, 'k--', label="Best Fit V22")
+
+plt.xlabel("Wavelength (nm)")
+plt.ylabel("Intensity (R)")
+plt.title("V22 with Best Fit")
+plt.legend()
+plt.show()
+
+
+#%%
+
+data2 = pd.read_csv("/Users/hannanasir/Desktop/plancksfinal.txt", delimiter="\t")
+
+# Extract wavelengths
+voltage = data2.iloc[:, 0]  # First column is wavelength
+lambda_min = data2.iloc[:,1]
+
+
+plt.xlabel("1/Voltage [1/kV]")
+plt.ylabel("λmin [pm]")
+XX = 1/voltage
+#plt.legend()
+plt.scatter(XX, lambda_min, color = "black")
+
+
+m, c = np.polyfit(XX, lambda_min, 1)
+plt.plot(XX, (XX*m + c), color = "purple")
+
+plt.show()
+print(m)
+
+#A = m = 1206.641228733pmkV = 
+#A = hc/e 
+
+A = m* 1e-12 * 1e3
+
+c = 3e8
+e = 1.6e-19
+
+h = (e*A)/c
+
+print(h)
+
+#%%
+
+data3 = pd.read_csv("/Users/hannanasir/Desktop/wavelengthcurrent.txt", delimiter="\t")
+
+# Extract wavelengths
+wavelength = data3.iloc[:, 0]  # First column is wavelength
+oneMA = data3.iloc[:,1]
+halfMA = data3.iloc[:,2]
+onetenthMA = data3.iloc[:,3]
+
+plt.plot(wavelength, oneMA, label = '1mA', color = 'darkblue')
+plt.plot(wavelength, halfMA, label = '0.5mA', color = "purple")
+plt.plot(wavelength, onetenthMA, label = '0.01mA', color = 'darkviolet')
+plt.legend()
+#%%
+
+#peaks at 62.9 wavelength and 70.7
+#current at 62.9 = 211.47, 95.2, 17.73
+#current at 70.7 = 322.67, 149.6, 26.67
+#current at 80.4 = 32.6, 16.6, 2.87
+
+current = np.array([1, 0.5, 0.1])
+peak1 = np.array([211.47, 95.2, 17.73])
+peak2 = np.array([322.67, 149.6, 26.67])
+nopeak = np.array([32.6, 16.6, 2.87])
+
+plt.plot(current, peak1)
+plt.plot(current, peak2)
+plt.plot(current, nopeak)
+plt.show()
