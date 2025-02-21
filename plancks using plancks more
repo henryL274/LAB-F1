@@ -1,0 +1,94 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.stats import linregress
+
+def moving_average(data, window_size=3):
+    return np.convolve(data, np.ones(window_size)/window_size, mode='same')
+
+# Constants
+electron_charge = 1.602e-19  # Coulombs
+speed_of_light = 3.00e8  # m/s
+d_spacing = 2.82e-10  # Example d-spacing in meters
+
+# Load dataset
+file_path = "C:/Users/henry/Documents/LAB E2/plancksmoreu.txt"
+data = pd.read_csv(file_path, delimiter="\t").fillna(0.0)
+
+# Extract angles and intensities
+wavelengths = data.iloc[:, 0].values  # First column is wavelength
+intensities = data.iloc[:, 1:].values  # Remaining columns are intensity for different voltages
+voltages = np.array([22, 24, 26, 28, 30, 32, 34, 35, 33, 31, 29, 27, 25, 23])
+
+# Uncertainties
+voltage_uncertainty = 0.5  # kV
+angle_uncertainty = 2*d_spacing*np.sin(np.radians(0.1))  # degrees
+intensity_uncertainty = 0.05  # 5%
+
+# Plot intensity vs angle for each voltage with fits
+plt.figure(figsize=(10, 6))
+x_intercepts = []
+valid_voltages = []
+for i, voltage in enumerate(voltages):
+    intensity = intensities[:, i]
+    intensity_unc = intensity * intensity_uncertainty
+    plt.errorbar(wavelengths, intensity, yerr=intensity_unc, fmt='x')
+    
+    gradient = np.gradient(intensity)
+    smoothed_gradient = moving_average(gradient, window_size=5)
+    dynamic_threshold = 0.1 * np.max(smoothed_gradient) if voltage > 21 else 0.02 * np.max(smoothed_gradient)
+    valid_indices = np.where(smoothed_gradient > dynamic_threshold)[0]
+    if len(valid_indices) > 5:
+        for j in range(len(valid_indices) - 3):
+            if all(smoothed_gradient[valid_indices[j:j+3]] > dynamic_threshold):
+                start_index = valid_indices[j]
+                break
+        else:
+            start_index = valid_indices[0]
+        peak_index = np.argmax(intensity)
+        end_index = min(peak_index, start_index + (10 if voltage <= 28 else 10))
+        rising_wavelengths = wavelengths[start_index:end_index]
+        rising_intensity = intensity[start_index:end_index]
+        if len(rising_wavelengths) > 2:
+            poly_coeffs = np.polyfit(rising_wavelengths, rising_intensity, 1)
+            poly_fit = np.poly1d(poly_coeffs)
+            x_intercept = -poly_coeffs[1] / poly_coeffs[0]
+            x_intercepts.append(x_intercept)
+            valid_voltages.append(voltage)
+            fit_y = poly_fit(rising_wavelengths)
+            plt.plot(rising_wavelengths, fit_y, '--', label=f'Fit {voltage} kV')
+
+plt.xlabel('Wavelength (pm)')
+plt.ylabel('Intensity (counts/sec)')
+plt.legend()
+plt.title('Bremsstrahlung Spectra with Linear Fits')
+plt.show()
+
+# Convert x_intercepts to wavelengths (assuming x_intercepts are in pm)
+x_intercepts = np.array(x_intercepts)
+wavelengths_fit = x_intercepts * 1e-12  # Convert pm to meters
+valid_voltages = np.array(valid_voltages)
+energies = valid_voltages * 1e3 
+reciprocal_energies = 1 / energies  # Inverse energy
+
+# Ensure data consistency
+if len(wavelengths_fit) != len(reciprocal_energies):
+    raise ValueError("Mismatch between wavelengths and reciprocal energies lengths. Cannot perform regression.")
+
+# Perform linear fit
+slope, intercept, _, _, std_err = linregress(reciprocal_energies, wavelengths_fit)
+
+# Calculate Planck's constant from the gradient
+plancks_constant = slope * electron_charge / speed_of_light
+plancks_uncertainty = std_err * electron_charge / speed_of_light  # Propagated uncertainty
+
+print(f'Estimated Planck\'s Constant: {plancks_constant:.2e} ± {plancks_uncertainty:.2e} Js')
+# Plot 1/Energy vs Minimum Wavelength
+plt.figure(figsize=(8, 5))
+plt.errorbar(reciprocal_energies, wavelengths_fit, fmt='o', color='red', label='Data Points')
+plt.plot(reciprocal_energies, slope * reciprocal_energies + intercept, '--', label='Linear Fit')
+plt.xlabel('1 / Energy (1/J)')  # Fixed axis labels
+plt.ylabel('Minimum Wavelength (m)')
+plt.title('1/Energy vs Minimum Wavelength')
+plt.legend()
+plt.show()
