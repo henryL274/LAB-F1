@@ -1,0 +1,425 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Feb 24 16:34:59 2025
+
+@author: henry
+"""
+#%%
+"""
+LINEAR FIT
+"""
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.stats import linregress
+
+def moving_average(data, window_size=3):
+    return np.convolve(data, np.ones(window_size)/window_size, mode='same')
+
+# Constants
+electron_charge = 1.602e-19  # Coulombs
+speed_of_light = 3.00e8  # m/s
+d_spacing = 282  # Example d-spacing in meters
+angle_uncertainty = np.radians(0.05)  # Convert degrees to radians
+voltage_uncertainty = 100  # Volts
+
+# Load dataset
+file_path = "C:/Users/henry/Documents/LAB E2/plancksmoreu.txt"
+data = pd.read_csv(file_path, delimiter="\t").fillna(0.0)
+
+# Extract angles and intensities
+wavelengths = data.iloc[:, 0].values  # First column is wavelength
+intensities = data.iloc[:, 1:].values  # Remaining columns are intensity for different voltages
+voltages = np.array([22, 24, 26, 28, 30, 32, 34, 35, 33, 31, 29, 27, 25, 23])
+
+# Uncertainties
+wavelength_uncertainty = 2 * d_spacing * np.cos(np.arcsin(wavelengths / (2 * d_spacing))) * angle_uncertainty
+intensity_uncertainty = np.sqrt(intensities)  # sqrt(N) uncertainty
+
+plt.figure(figsize=(10, 6))
+plt.title('Linear Fits')
+plt.xlabel('Wavelength [pm]')
+plt.ylabel('Intensity [counts/sec]')
+
+x_intercepts = []
+valid_voltages = []
+x_intercept_uncertainties = []
+for i, voltage in enumerate(voltages):
+    intensity = intensities[:, i]
+    intensity_unc = intensity_uncertainty[:, i]
+    gradient = np.gradient(intensity)
+    smoothed_gradient = moving_average(gradient, window_size=5)
+    dynamic_threshold = 0.2 * np.max(smoothed_gradient) if voltage > 26 else 0.1 * np.max(smoothed_gradient)
+    valid_indices = np.where(smoothed_gradient > dynamic_threshold)[0]
+    if len(valid_indices) > 5:
+        for j in range(len(valid_indices) - 3):
+            if all(smoothed_gradient[valid_indices[j:j+3]] > dynamic_threshold):
+                start_index = valid_indices[j]
+                break
+        else:
+            start_index = valid_indices[0]
+        peak_index = np.argmax(intensity)
+        end_index = min(peak_index, start_index + (10 if voltage <= 29 else 12))
+        rising_wavelengths = wavelengths[start_index:end_index]
+        rising_intensity = intensity[start_index:end_index]
+        rising_wavelength_unc = wavelength_uncertainty[start_index:end_index]
+        rising_intensity_unc = intensity_unc[start_index:end_index]
+        if len(rising_wavelengths) > 2:
+            # Initial unweighted fit to estimate slope
+            initial_poly_coeffs = np.polyfit(rising_wavelengths, rising_intensity, 1)
+            initial_slope = initial_poly_coeffs[0]
+            
+            # Compute effective uncertainties
+            effective_unc = np.sqrt(rising_intensity_unc**2 + (initial_slope**2 * rising_wavelength_unc**2))
+            
+            # Perform weighted fit
+            poly_coeffs, cov = np.polyfit(rising_wavelengths, rising_intensity, 1, cov=True, w=1/effective_unc)
+            poly_fit = np.poly1d(poly_coeffs)
+            x_intercept = -poly_coeffs[1] / poly_coeffs[0]
+            x_intercept_uncertainty = np.sqrt((cov[1, 1] / poly_coeffs[0]**2) + (cov[0, 0] * poly_coeffs[1]**2 / poly_coeffs[0]**4))
+            x_intercepts.append(x_intercept)
+            x_intercept_uncertainties.append(x_intercept_uncertainty)
+            valid_voltages.append(voltage)
+            full = np.linspace(min(rising_wavelengths)-1,max(rising_wavelengths)+2,1000)
+            fit_y = poly_fit(full)
+            plt.plot(full, fit_y, '-',color="black")
+            plt.errorbar(wavelengths,intensity,yerr=intensity_unc,xerr=wavelength_uncertainty,fmt=".",label=f"{voltage}kV",capsize=1)
+                     
+for x, x_unc in zip(x_intercepts, x_intercept_uncertainties):
+    plt.axvline(x, color="r", linestyle="-")  # Vertical line at x-intercept
+    plt.fill_betweenx([0, 600], x - x_unc, x + x_unc, color="blue", alpha=0.1)  # Shaded region for uncertainty
+    
+plt.xlim(32,60)
+plt.ylim(0,600)
+plt.legend()
+plt.grid()
+plt.show()
+
+# Convert x_intercepts to wavelengths (assuming x_intercepts are in pm)
+x_intercepts = np.array(x_intercepts)
+x_intercept_uncertainties = np.array(x_intercept_uncertainties)
+lambda_min_linear = x_intercepts * 1e-12  # Convert pm to meters
+lambda_min_uncertainties_linear = x_intercept_uncertainties * 1e-12
+
+valid_voltages = np.array(valid_voltages)
+energies = valid_voltages * 1e3  # Convert kV to V
+reciprocal_energies = 1 / energies
+reciprocal_energy_uncertainties = voltage_uncertainty / (energies**2)
+#%%
+"""
+EXPONENTIAL FIT
+"""
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.stats import linregress
+
+threshold_intensity = 7
+
+plt.figure(figsize=(10, 6))
+plt.title('Exponential Fits')
+plt.xlabel('Wavelength [pm]')
+plt.ylabel('Intensity [counts/sec]')
+
+x_intercepts = []
+valid_voltages = []
+x_intercept_uncertainties = []
+for i, voltage in enumerate(voltages):
+    intensity = intensities[:, i]
+    intensity_unc = intensity_uncertainty[:, i]
+    plt.errorbar(wavelengths, intensity, yerr=intensity_unc,xerr = wavelength_uncertainty, fmt='x', label=f"{voltage}kV")
+    
+    gradient = np.gradient(intensity)
+    smoothed_gradient = moving_average(gradient, window_size=5)
+    dynamic_threshold = 0.2 * np.max(smoothed_gradient) if voltage > 26 else 0.1 * np.max(smoothed_gradient)
+    valid_indices = np.where(smoothed_gradient > dynamic_threshold)[0]
+    if len(valid_indices) > 5:
+        for j in range(len(valid_indices) - 3):
+            if all(smoothed_gradient[valid_indices[j:j+3]] > dynamic_threshold):
+                start_index = valid_indices[j]
+                break
+        else:
+            start_index = valid_indices[0]
+        peak_index = np.argmax(intensity)
+        end_index = min(peak_index, start_index + (4 if voltage <= 28 else 5))
+        rising_wavelengths = wavelengths[start_index:end_index]
+        rising_intensity = intensity[start_index:end_index]
+        rising_wavelength_unc = wavelength_uncertainty[start_index:end_index]
+        rising_intensity_unc = intensity_unc[start_index:end_index]
+        
+        if len(rising_wavelengths) > 2:
+            # Initial unweighted fit to estimate slope
+            initial_poly_coeffs = np.polyfit(rising_wavelengths, np.log(rising_intensity), 1)
+            initial_slope = initial_poly_coeffs[0]
+            
+            # Compute effective uncertainties
+            effective_unc = np.sqrt((rising_intensity_unc / rising_intensity)**2 + (initial_slope**2 * rising_wavelength_unc**2))
+            
+            # Perform weighted fit
+            poly_coeffs, cov = np.polyfit(rising_wavelengths, np.log(rising_intensity), 1, cov=True, w=1/effective_unc)
+            A_fit = np.exp(poly_coeffs[1])
+            B_fit = poly_coeffs[0]
+            
+            # Compute uncertainty in x_intercept (lambda_min)
+            x_intercept = (np.log(threshold_intensity) - poly_coeffs[1]) / poly_coeffs[0]
+            x_intercept_uncertainty = np.sqrt((cov[1, 1] / poly_coeffs[0]**2) + (cov[0, 0] * poly_coeffs[1]**2 / poly_coeffs[0]**4))
+            x_intercepts.append(x_intercept)
+            x_intercept_uncertainties.append(x_intercept_uncertainty)
+            valid_voltages.append(voltage)
+            
+            full = np.linspace(min(rising_wavelengths)-1,max(rising_wavelengths)+2,1000)
+            fit_y = A_fit * np.exp(B_fit * full)
+            plt.plot(full, fit_y, '-',color="black")
+
+for x, x_unc in zip(x_intercepts, x_intercept_uncertainties):
+    plt.axvline(x, color="r", linestyle="-")  # Vertical line at x-intercept
+    plt.axhline(threshold_intensity,color="red",linestyle="--",alpha=0.6)
+    plt.fill_betweenx([0, 600], x - x_unc, x + x_unc, color="blue", alpha=0.1)  # Shaded region for uncertainty
+
+plt.xlim(32,60)
+plt.ylim(0,600)
+plt.legend()
+plt.grid()
+plt.show()
+
+# Convert x_intercepts to wavelengths (assuming x_intercepts are in pm)
+x_intercepts = np.array(x_intercepts)
+x_intercept_uncertainties = np.array(x_intercept_uncertainties)
+lambda_min_exponential = x_intercepts * 1e-12  # Convert pm to meters
+lambda_min_uncertainties_exponential = x_intercept_uncertainties * 1e-12
+
+valid_voltages = np.array(valid_voltages)
+energies = valid_voltages * 1e3  # Convert kV to V
+reciprocal_energies = 1 / energies
+reciprocal_energy_uncertainties = voltage_uncertainty / (energies**2)
+
+
+#%%
+"""
+GAUSSIAN FIT
+"""
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.stats import linregress
+from scipy.optimize import curve_fit
+from scipy.interpolate import interp1d
+
+def half_gaussian(x, A, mu, sigma):
+    return A * np.exp(-((x - mu) ** 2) / (2 * sigma ** 2))
+
+threshold_intensity = 7
+
+plt.figure(figsize=(10, 6))
+plt.title('Half Gaussian Fits')
+plt.xlabel('Wavelength [pm]')
+plt.ylabel('Intensity [counts/sec]')
+
+x_intercepts = []
+valid_voltages = []
+x_intercept_uncertainties = []
+for i, voltage in enumerate(voltages):
+    intensity = intensities[:, i]
+    intensity_unc = intensity_uncertainty[:, i]
+    plt.errorbar(wavelengths, intensity, yerr=intensity_unc,xerr = wavelength_uncertainty, fmt='x', label=f"{voltage}kV")
+    
+    gradient = np.gradient(intensity)
+    smoothed_gradient = moving_average(gradient, window_size=5)
+    dynamic_threshold = 0.2 * np.max(smoothed_gradient) if voltage > 26 else 0.1 * np.max(smoothed_gradient)
+    valid_indices = np.where(smoothed_gradient > dynamic_threshold)[0]
+    if len(valid_indices) > 5:
+        for j in range(len(valid_indices) - 3):
+            if all(smoothed_gradient[valid_indices[j:j+3]] > dynamic_threshold):
+                start_index = valid_indices[j]
+                break
+        else:
+            start_index = valid_indices[0]
+        peak_index = np.argmax(intensity)
+        end_index = min(peak_index, start_index + (6 if voltage <= 29 else 8))
+        rising_wavelengths = wavelengths[start_index:end_index]
+        rising_intensity = intensity[start_index:end_index]
+        rising_wavelength_unc = wavelength_uncertainty[start_index:end_index]
+        rising_intensity_unc = intensity_unc[start_index:end_index]
+        
+        if len(rising_wavelengths) > 2:
+            try:
+                popt, pcov = curve_fit(half_gaussian, rising_wavelengths, rising_intensity,
+                                       p0=[max(intensity), np.mean(rising_wavelengths), np.std(rising_wavelengths)])
+                A_fit, mu_fit, sigma_fit = popt
+                mu_fit_uncertainty = np.sqrt(pcov[1, 1])
+                
+                # Find lambda_min by interpolating where fit crosses threshold intensity
+                fit_x = np.linspace(min(rising_wavelengths)-2, max(rising_wavelengths), 1000)
+                fit_y = half_gaussian(fit_x, *popt)
+                try:
+                    interp_func = interp1d(fit_y, fit_x, kind='linear', bounds_error=False, fill_value=np.nan)
+                    lambda_min = interp_func(threshold_intensity)
+                except ValueError:
+                    lambda_min = np.nan
+                
+                if not np.isnan(lambda_min):
+                    x_intercepts.append(lambda_min)
+                    x_intercept_uncertainties.append(mu_fit_uncertainty)
+                    valid_voltages.append(voltage)
+                
+                plt.plot(fit_x, fit_y, '-', color="black")
+                
+            except RuntimeError:
+                print(f"Fit failed for voltage {voltage} kV")
+
+for x, x_unc in zip(x_intercepts, x_intercept_uncertainties):
+    plt.axvline(x, color="r", linestyle="--")  # Vertical line at x-intercept
+    plt.fill_betweenx([0, 600], x - x_unc, x + x_unc, color="blue", alpha=0.3)  # Shaded region for uncertainty
+    plt.axhline(7,color="r",linestyle = "--",alpha=0.6)
+    
+plt.xlim(32,60)
+plt.ylim(0,600)
+plt.legend()
+plt.grid()
+plt.show()
+
+# Convert x_intercepts to wavelengths (assuming x_intercepts are in pm)
+x_intercepts = np.array(x_intercepts)
+x_intercept_uncertainties = np.array(x_intercept_uncertainties)
+lambda_min_gaussian = x_intercepts * 1e-12  # Convert pm to meters
+lambda_min_uncertainties_gaussian = x_intercept_uncertainties * 1e-12
+
+valid_voltages = np.array(valid_voltages)
+energies = valid_voltages * 1e3  # Convert kV to V
+reciprocal_energies = 1 / energies
+reciprocal_energy_uncertainties = voltage_uncertainty / (energies**2)
+
+#%%
+
+# Stack lambda_min values and their uncertainties for all fits
+lambda_min_values = np.vstack([lambda_min_linear, lambda_min_gaussian, lambda_min_exponential])
+lambda_min_uncertainties = np.vstack([lambda_min_uncertainties_linear, lambda_min_uncertainties_gaussian, lambda_min_uncertainties_exponential])  # Assuming these are your uncertainties
+
+mean_lambdas = np.mean(lambda_min_values, axis=0)
+
+mean_fit_uncertainty = np.mean(lambda_min_uncertainties, axis=0)
+
+spread_of_uncertainties = np.std(lambda_min_uncertainties, axis=0)
+
+total_statistical_uncertainties = np.std(lambda_min_values, axis=0)
+total_experimental_uncertainties = np.sqrt(mean_fit_uncertainty**2 + spread_of_uncertainties**2)
+
+total_uncertainties = np.sqrt(total_experimental_uncertainties**2 + total_statistical_uncertainties**2)
+
+mean_lambdas = np.mean(np.vstack([lambda_min_linear, lambda_min_gaussian, lambda_min_exponential]), axis=0)
+
+# Check if lengths match
+if len(mean_lambdas) != len(reciprocal_energies):
+    raise ValueError("Mismatch between wavelengths and reciprocal energies lengths. Cannot perform regression.")
+
+# Perform weighted linear regression with updated uncertainties
+weights = 1 / total_uncertainties**2  # Updated weights
+p, cov = np.polyfit(reciprocal_energies, mean_lambdas, 1, w=weights, cov=True)
+slope, intercept = p
+std_err_slope = np.sqrt(cov[0, 0])  # Uncertainty in slope
+
+# Calculate Planck's constant with the new uncertainty
+plancks_constant = slope * electron_charge / speed_of_light
+plancks_uncertainty = std_err_slope * electron_charge / speed_of_light  # Propagated uncertainty
+
+print(f'Estimated Planck\'s Constant (Weighted): {plancks_constant:.2e} ± {plancks_uncertainty:.2e} Js')
+
+# Plot 1/Energy vs Minimum Wavelength with updated uncertainties
+plt.figure(figsize=(8, 6))
+plt.errorbar(reciprocal_energies, mean_lambdas, yerr=total_uncertainties, fmt='x', color='darkviolet', 
+             label='Mean $\lambda_{min}$', capsize=3)
+plt.plot(reciprocal_energies, slope * reciprocal_energies + intercept, '--', label='Weighted Fit')
+
+# Individual points with updated uncertainties
+plt.errorbar(reciprocal_energies, lambda_min_linear, fmt='.', label='Linear Fit', capsize=3)
+plt.errorbar(reciprocal_energies, lambda_min_gaussian, fmt='.', label='Gaussian Fit', capsize=3)
+plt.errorbar(reciprocal_energies, lambda_min_exponential, fmt='.', label='Exponential Fit', capsize=3)
+
+plt.xlabel('1 / Energy (1/J)')
+plt.ylabel('Minimum Wavelength (m)')
+plt.title("Minimum Wavelengths with Weighted Fit (Including Spread)")
+plt.legend()
+plt.grid()
+plt.show()
+
+
+#%%
+
+# Adjust uncertainties so that they cross around the central fit
+upper_cross_lambdas = mean_lambdas + total_uncertainties  # Start above, end below
+lower_cross_lambdas = mean_lambdas - total_uncertainties  # Start below, end above
+        
+
+# Force crossing by swapping values in half the dataset
+half_point = len(mean_lambdas) // 2
+upper_cross_lambdas[:half_point] = mean_lambdas[:half_point] - total_uncertainties[:half_point]
+lower_cross_lambdas[:half_point] = mean_lambdas[:half_point] + total_uncertainties[:half_point]
+
+upper_upper=[]
+upper_lower=[]
+for i in upper_cross_lambdas:
+    if i >= half_point:
+        upper_upper.append(i)
+    else:
+        upper_lower.append(i)
+        
+lower_upper=[]
+lower_lower=[]
+for i in lower_cross_lambdas:
+    if i >= half_point:
+        lower_upper.append(i)
+    else:
+        lower_lower.append(i)
+        
+low_gradient = np.concatenate((upper_lower,lower_upper))
+high_gradient = np.concatenate((lower_lower,upper_upper))
+
+# Perform linear fits for these modified datasets
+p_max_cross, _ = np.polyfit(reciprocal_energies, high_gradient, 1, cov=True)
+p_min_cross, _ = np.polyfit(reciprocal_energies, low_gradient, 1, cov=True)
+
+slope_max_cross, intercept_max_cross = p_max_cross
+slope_min_cross, intercept_min_cross = p_min_cross
+
+# Compute Planck's constant using these slopes
+plancks_constant_max_cross = slope_max_cross * electron_charge / speed_of_light
+plancks_constant_min_cross = slope_min_cross * electron_charge / speed_of_light
+
+# Compute final uncertainty range
+plancks_uncertainty_range_cross = (plancks_constant_max_cross - plancks_constant_min_cross)/ 2
+
+print(f"Planck's Constant (Crossing Fit Method): {plancks_constant:.2e} ± {plancks_uncertainty_range_cross:.2e} Js")
+
+full_reciprocal_E = np.linspace(0,5e-5,100)
+
+# Plot the new fits
+plt.figure(figsize=(8, 6))
+plt.errorbar(reciprocal_energies, mean_lambdas, yerr=total_uncertainties, fmt='x', color='darkviolet', 
+             label='Mean λ_min', capsize=3)
+plt.plot(full_reciprocal_E, slope * full_reciprocal_E + intercept, '--', color='blue',label = f"$h = ({(plancks_constant*1e34):.3f} \\pm {(plancks_uncertainty_range_cross*1e34):.3f}) \\times 10^{{-34}}$ Js"
+)
+plt.plot(full_reciprocal_E, slope_max_cross * full_reciprocal_E + intercept_max_cross, '--', 
+         label='Max Crossing Fit', color='red')
+plt.plot(full_reciprocal_E, slope_min_cross * full_reciprocal_E + intercept_min_cross, '--', 
+         label='Min Crossing Fit', color='green')
+
+# Define true slope using known values
+true_plancks_slope = (6.626e-34* 3.00e8) / (1.602e-19)
+
+# Compute the true line values
+true_lambdas = true_plancks_slope * np.array(full_reciprocal_E)
+
+# Plot the true line in black
+plt.plot(full_reciprocal_E, true_lambdas, 'k-', label="True Planck's Fit (h = 6.626e-34 Js)")
+
+
+plt.xlabel('1 / Energy (1/J)')
+plt.ylabel('Minimum Wavelength (m)')
+plt.title("Planck's Constant From Linear Fit")
+plt.xlim(0,5e-5)
+plt.ylim(0,7.0e-11)
+plt.legend()
+plt.grid()
+plt.show()
