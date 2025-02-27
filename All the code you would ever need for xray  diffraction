@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Created on Mon Feb 24 16:34:59 2025
+Created on Tue Feb 25 18:08:32 2025
 
 @author: henry
 """
@@ -21,7 +21,7 @@ electron_charge = 1.602e-19  # Coulombs
 speed_of_light = 3.00e8  # m/s
 d_spacing = 282  # Example d-spacing in meters
 angle_uncertainty = np.radians(0.05)  # Convert degrees to radians
-voltage_uncertainty = 100  # Volts
+voltage_uncertainty = 500  # Volts
 
 # Load dataset
 file_path = "C:/Users/henry/Documents/LAB E2/plancksmoreu.txt"
@@ -83,7 +83,7 @@ for i, voltage in enumerate(voltages):
             full = np.linspace(min(rising_wavelengths)-1,max(rising_wavelengths)+2,1000)
             fit_y = poly_fit(full)
             plt.plot(full, fit_y, '-',color="black")
-            plt.errorbar(wavelengths,intensity,yerr=intensity_unc,xerr=wavelength_uncertainty,fmt=".",label=f"{voltage}kV",capsize=1)
+            plt.errorbar(wavelengths,intensity,yerr=intensity_unc,xerr=wavelength_uncertainty,fmt=".",label=f"{voltage}kV",capsize=2)
                      
 for x, x_unc in zip(x_intercepts, x_intercept_uncertainties):
     plt.axvline(x, color="r", linestyle="-")  # Vertical line at x-intercept
@@ -210,6 +210,44 @@ from scipy.interpolate import interp1d
 def half_gaussian(x, A, mu, sigma):
     return A * np.exp(-((x - mu) ** 2) / (2 * sigma ** 2))
 
+def gaussian_x_uncertainty(y, A, sigma_A, mu, sigma_mu, sigma, sigma_sigma, sigma_y):
+    """
+    Compute the uncertainty in x given a y-value along a Gaussian curve.
+    
+    Parameters:
+        y : float       -> Measured y-value
+        A : float       -> Amplitude of Gaussian
+        sigma_A : float -> Uncertainty in amplitude A
+        mu : float      -> Mean of Gaussian
+        sigma_mu : float -> Uncertainty in mean mu
+        sigma : float   -> Standard deviation of Gaussian
+        sigma_sigma : float -> Uncertainty in standard deviation sigma
+        sigma_y : float -> Uncertainty in y-value
+        
+    Returns:
+        sigma_x : float -> Uncertainty in the x-value corresponding to y
+    """
+    if y <= 0 or y > A:
+        raise ValueError("y must be positive and less than or equal to A")
+
+    ln_term = -2 * np.log(y / A)
+    sqrt_ln_term = np.sqrt(ln_term)
+    
+    # Partial derivatives
+    dx_dA = (sigma / (A * sqrt_ln_term)) * y
+    dx_dmu = 1
+    dx_dsigma = sqrt_ln_term
+    dx_dy = -sigma / (sqrt_ln_term * y)
+    
+    # Propagated uncertainty
+    sigma_x = np.sqrt((dx_dA * sigma_A) ** 2 +
+                      (dx_dmu * sigma_mu) ** 2 +
+                      (dx_dsigma * sigma_sigma) ** 2 +
+                      (dx_dy * sigma_y) ** 2)
+    
+    return sigma_x
+
+
 threshold_intensity = 7
 
 plt.figure(figsize=(10, 6))
@@ -248,7 +286,7 @@ for i, voltage in enumerate(voltages):
                 popt, pcov = curve_fit(half_gaussian, rising_wavelengths, rising_intensity,
                                        p0=[max(intensity), np.mean(rising_wavelengths), np.std(rising_wavelengths)])
                 A_fit, mu_fit, sigma_fit = popt
-                mu_fit_uncertainty = np.sqrt(pcov[1, 1])
+                mu_fit_uncertainty = gaussian_x_uncertainty(threshold_intensity, A_fit, pcov[0,0], mu_fit, pcov[1,1], sigma_fit, pcov[2,2], 0)
                 
                 # Find lambda_min by interpolating where fit crosses threshold intensity
                 fit_x = np.linspace(min(rising_wavelengths)-2, max(rising_wavelengths), 1000)
@@ -396,8 +434,8 @@ full_reciprocal_E = np.linspace(0,5e-5,100)
 
 # Plot the new fits
 plt.figure(figsize=(8, 6))
-plt.errorbar(reciprocal_energies, mean_lambdas, yerr=total_uncertainties, fmt='x', color='darkviolet', 
-             label='Mean λ_min', capsize=3)
+plt.errorbar(reciprocal_energies, mean_lambdas, yerr=total_uncertainties, xerr = reciprocal_energy_uncertainties,fmt='x', color='darkviolet', 
+             label='Mean λ_min', capsize=2)
 plt.plot(full_reciprocal_E, slope * full_reciprocal_E + intercept, '--', color='blue',label = f"$h = ({(plancks_constant*1e34):.3f} \\pm {(plancks_uncertainty_range_cross*1e34):.3f}) \\times 10^{{-34}}$ Js"
 )
 plt.plot(full_reciprocal_E, slope_max_cross * full_reciprocal_E + intercept_max_cross, '--', 
