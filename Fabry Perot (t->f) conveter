@@ -1,0 +1,52 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.signal import find_peaks
+from scipy.optimize import curve_fit
+
+# --- Load Fabry-Pérot Data ---
+# Replace with your actual file path
+file_path = "C:/Users/henry/Documents/LAB D2/6MARCH03.CSV"
+
+# Load time and intensity (voltage)
+time, voltage = np.loadtxt(file_path, delimiter=",", skiprows=1, usecols=(0, 1)).T
+
+# --- Constants ---
+SPEED_OF_LIGHT = 3.0e8  # m/s
+CAVITY_LENGTH = 0.2  # meters (adjust based on your setup)
+FSR = SPEED_OF_LIGHT / (2 * CAVITY_LENGTH)  # Free Spectral Range (Hz)
+f0 = 384000e9  # Approximate starting frequency (adjust as needed)
+
+# --- Detect Transmission Peaks ---
+peaks, _ = find_peaks(voltage, height=0.5 * np.max(voltage), distance=len(time)//100)
+
+# Get peak times
+peak_times = time[peaks]
+
+# Assign frequencies to peaks based on FSR
+peak_frequencies = f0 + np.arange(len(peak_times)) * FSR
+
+# --- Fit a Linear Function to Frequency vs. Time ---
+def linear_fit(t, a, b):
+    return a * t + b
+
+# Perform curve fitting
+popt, _ = curve_fit(linear_fit, peak_times, peak_frequencies, p0=[FSR / (peak_times[-1] - peak_times[0]), f0])
+
+# Extract best-fit parameters
+a_fit, b_fit = popt
+
+# Generate frequency for all time points
+frequency_fit = linear_fit(time, a_fit, b_fit)
+
+# --- Plot Results ---
+plt.figure(figsize=(10, 5))
+plt.plot(time, frequency_fit / 1e9, label="Reconstructed Frequency (GHz)", color="red")
+plt.scatter(peak_times, peak_frequencies / 1e9, color="blue", label="Fabry-Pérot Peaks", zorder=3)
+plt.xlabel("Time (s)")
+plt.ylabel("Frequency (GHz)")
+plt.title("Reconstructed Frequency Modulation from Fabry-Pérot Interferometer")
+plt.legend()
+plt.show()
+
+# --- Print Fit Parameters ---
+print(f"Recovered Frequency Modulation: f(t) = {a_fit:.2e} * t + {b_fit:.2e}")
