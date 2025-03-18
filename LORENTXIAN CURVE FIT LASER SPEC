@@ -1,0 +1,78 @@
+#LORENTZIAN CURVE FIT
+
+"""
+Created on Sun Mar  9 19:43:30 2025
+
+@author: hannanasir
+"""
+
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import curve_fit
+from scipy.signal import find_peaks
+
+def lorentzian(x, x0, gamma, A, B):
+    return A * (gamma**2 / ((x - x0)**2 + gamma**2)) + B
+
+# Load data
+data_file = "/Users/hannanasir/Desktop/Laser SPEC/6MARCH03.CSV"
+t, C3, C2 = np.loadtxt(data_file, skiprows=1, delimiter=",", unpack=True)
+
+plt.figure(figsize=(10, 6))
+plt.plot(t, C2, label='Original Data', color='blue')
+plt.show()
+
+#%%
+
+fabry_perot = C3 * 10
+doppler_free = C2
+
+data_file2 = "/Users/hannanasir/Desktop/Laser SPEC/6MARCH2.CSV"
+t2, ref, C33 = np.loadtxt(data_file2, skiprows=1, delimiter=",", unpack=True)
+
+background = C2 - C33
+plt.plot(t2, background, color='purple', label='Background')
+
+# Identify peaks above threshold with prominence filtering
+threshold = 0.04
+peaks, properties = find_peaks(background, height=threshold, prominence=0.02, width=5)
+
+# Fit Lorentzian to each peak
+fit_params = []
+plt.figure(figsize=(10, 6))
+plt.plot(t2, background, color='purple', label='Background Data')
+
+for peak in peaks:
+    # Define a wider fitting range for full peak shape
+    window = 200  # Further increased to capture full curve
+    left = max(0, peak - window)
+    right = min(len(t2), peak + window)
+    x_data = t2[left:right]
+    y_data = background[left:right]
+    
+    # Initial guesses: x0 (peak position), gamma (width), A (height), B (baseline)
+    gamma_guess = (max(x_data) - min(x_data)) / 10  # Estimate width
+    A_guess = max(y_data) - min(y_data)  # Peak height
+    B_guess = np.median(y_data)  # Background level
+
+    p0 = [t2[peak], gamma_guess, A_guess, B_guess]
+    
+    try:
+        popt, _ = curve_fit(lorentzian, x_data, y_data, p0=p0, maxfev=10000)
+        fit_params.append(popt)
+        
+        # Plot the fitted Lorentzian curve over the full peak range
+        fit_x = np.linspace(x_data[0], x_data[-1], 1000)  # More points for smoothness
+        fit_y = lorentzian(fit_x, *popt)
+        plt.plot(fit_x, fit_y, '-', label=f'Fit at {t2[peak]:.4f}')
+    except RuntimeError:
+        print(f"Lorentzian fit failed for peak at {t2[peak]:.4f}")
+
+plt.legend()
+plt.show()
+
+
+
+
+
+#
