@@ -1,0 +1,643 @@
+import os
+import re
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.ticker import ScalarFormatter  # Changed from ScientificNotation
+from scipy.signal import savgol_filter
+from scipy.optimize import curve_fit
+from scipy.signal import find_peaks
+
+# Constants for easy adjustment
+DEFAULT_XLIM = (0.068, 0.082)  # X-axis limits
+MOVING_AVG_WINDOW_SIZE = 1500  # Window size for moving average
+SAVGOL_WINDOW_SIZE = 1500      # Window size for Savitzky-Golay filter
+SAVGOL_POLY_ORDER = 3          # Polynomial order for Savitzky-Golay filter
+BACKGROUND_SCALE = 0.65        # Scaling factor for background subtraction
+
+# Gaussian model definitions
+def two_gaussians(x, A1, mu1, sigma1, A2, mu2, sigma2):
+    """
+    Model function for two Gaussian peaks.
+    
+    Parameters:
+    -----------
+    x : array-like
+        X-axis values
+    A1, A2 : float
+        Amplitudes of the two Gaussians
+    mu1, mu2 : float
+        Center positions of the two Gaussians
+    sigma1, sigma2 : float
+        Standard deviations of the two Gaussians
+        
+    Returns:
+    --------
+    array-like
+        Combined Gaussian function values
+    """
+    return A1 * np.exp(-(x - mu1)**2 / (2 * sigma1**2)) + A2 * np.exp(-(x - mu2)**2 / (2 * sigma2**2))
+
+def load_data_files(folder_path, extension=".CSV"):
+    """
+    Load all CSV files in a folder into a dictionary of DataFrames.
+    
+    Parameters:
+    -----------
+    folder_path : str
+        Path to the folder containing data files
+    extension : str, optional
+        File extension to look for (default: ".CSV")
+        
+    Returns:
+    --------
+    dict
+        Dictionary with power values as keys and DataFrames as values
+    """
+    # Dictionary to store DataFrames
+    df_dict = {}
+    
+    try:
+        # Get list of all matching files in the folder
+        data_files = [f for f in os.listdir(folder_path) if f.endswith(extension)]
+        
+        if not data_files:
+            print(f"No {extension} files found in {folder_path}")
+            return df_dict
+        
+        # Process each file
+        for file in data_files:
+            file_path = os.path.join(folder_path, file)
+            
+            try:
+                # Try different delimiters if the default fails
+                try:
+                    df = pd.read_csv(file_path)
+                except:
+                    # Try with different delimiters
+                    for delimiter in [',', '\t', ';', ' ']:
+                        try:
+                            df = pd.read_csv(file_path, delimiter=delimiter)
+                            if len(df.columns) >= 2:  # Ensure at least two columns
+                                break
+                        except:
+                            continue
+                
+                # Extract the power value from filename
+                power_match = re.match(r"([\d\.]+)uW", file)
+                if power_match:
+                    power_key = power_match.group(1)
+                    
+                    # Rename columns for clarity if they don't have proper names
+                    if df.columns[0] == '0' or df.columns[0].isdigit():
+                        df.columns = ['Wavelength', 'Intensity']
+                    
+                    df_dict[power_key] = df
+                    print(f"Loaded: {file} (Power: {power_key}uW)")
+            
+            except Exception as e:
+                print(f"Error loading {file}: {str(e)}")
+                
+        return df_dict
+    
+    except Exception as e:
+        print(f"Error accessing folder {folder_path}: {str(e)}")
+        return df_dict
+
+def smooth_data(x_data, y_data, moving_avg_window=None, savgol_window=None, savgol_order=2):
+    """
+    Apply smoothing to data using both moving average and Savitzky-Golay filters.
+    
+    Parameters:
+    -----------
+    x_data : array-like
+        X-axis data
+    y_data : array-like
+        Y-axis data to be smoothed
+    moving_avg_window : int, optional
+        Window size for moving average (default: proportional to data length)
+    savgol_window : int, optional
+        Window size for Savitzky-Golay filter (default: proportional to data length)
+    savgol_order : int, optional
+        Polynomial order for Savitzky-Golay filter (default: 2)
+        
+    Returns:
+    --------
+    tuple
+        (x_data, averaged_smoothed_y_data)
+    """
+    # If window sizes are not specified, make them proportional to data length
+    if moving_avg_window is None:
+        moving_avg_window = max(5, len(x_data) // 100)
+        # Ensure window size is odd for savgol_filter
+        if moving_avg_window % 2 == 0:
+            moving_avg_window += 1
+    
+    if savgol_window is None:
+        savgol_window = max(5, len(x_data) // 50)
+        # Ensure window size is odd for savgol_filter
+        if savgol_window % 2 == 0:
+            savgol_window += 1
+            
+    # Moving average smoothing
+    y_ma = np.convolve(y_data, np.ones(moving_avg_window)/moving_avg_window, mode='same')
+    
+    # Savitzky-Golay smoothing
+    y_sg = savgol_filter(y_data, window_length=savgol_window, polyorder=savgol_order)
+    
+    # Average the two smoothing methods
+    y_avg = (y_ma + y_sg) / 2
+    
+    return x_data, y_avg
+
+def plot_raw_data(df_dict, keys=None, n_samples=4, xlim=DEFAULT_XLIM):
+    """
+    Plot raw data from multiple datasets.
+    
+    Parameters:
+    -----------
+    df_dict : dict
+        Dictionary of DataFrames
+    keys : list, optional
+        Specific keys to plot (default: None, randomly samples n_samples keys)
+    n_samples : int, optional
+        Number of random samples to plot if keys not specified (default: 4)
+    xlim : tuple, optional
+        X-axis limits (default: DEFAULT_XLIM)
+        
+    Returns:
+    --------
+    list
+        List of keys that were plotted
+    """
+    if not df_dict:
+        print("No data to plot")
+        return []
+        
+    if keys is None:
+        # Random sampling if no keys provided
+        keys = np.random.choice(list(df_dict.keys()), 
+                              min(n_samples, len(df_dict)), 
+                              replace=False)
+    
+    # Create figure with subplots
+    rows = int(np.ceil(len(keys) / 2))
+    fig, axes = plt.subplots(rows, 2, figsize=(12, 4*rows))
+    
+    # Handle single subplot case
+    if len(keys) == 1:
+        axes = np.array([axes])
+    
+    # Flatten axes for easier iteration
+    axes = axes.flatten()
+    
+    # Color palette for consistency
+    colors = plt.cm.viridis(np.linspace(0, 1, len(keys)))
+    
+    # Plot each dataset
+    for i, (key, color) in enumerate(zip(keys, colors)):
+        if i < len(axes):
+            df = df_dict[key]
+            x_col, y_col = df.columns[0], df.columns[1]
+            
+            # Here's the correction - apply subtraction to the data values, not column name
+            y_values = df[y_col] - BACKGROUND_SCALE * df[y_col].max()
+            
+            axes[i].plot(df[x_col], y_values, color=color, label=f"{key}uW")
+            axes[i].set_title(f"Power: {key}uW")
+            axes[i].set_xlabel("Wavelength (μm)")
+            axes[i].set_ylabel("Intensity (a.u.)")
+            axes[i].set_xlim(xlim)
+            axes[i].legend(loc='best')
+            
+            # Add grid for better readability
+            axes[i].grid(True, linestyle='--', alpha=0.7)
+            
+            # Use ScalarFormatter for scientific notation
+            axes[i].yaxis.set_major_formatter(ScalarFormatter(useMathText=True))
+            axes[i].ticklabel_format(style='sci', axis='y', scilimits=(0,0))
+    
+    # Hide unused subplots
+    for i in range(len(keys), len(axes)):
+        axes[i].set_visible(False)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    return keys
+
+def plot_smoothed_data(df_dict, keys, moving_avg_window=MOVING_AVG_WINDOW_SIZE, 
+                      savgol_window=SAVGOL_WINDOW_SIZE, savgol_order=SAVGOL_POLY_ORDER,
+                      xlim=DEFAULT_XLIM):
+    """
+    Plot original and smoothed data for selected datasets.
+    
+    Parameters:
+    -----------
+    df_dict : dict
+        Dictionary of DataFrames
+    keys : list
+        Keys to plot
+    moving_avg_window : int, optional
+        Window size for moving average
+    savgol_window : int, optional
+        Window size for Savitzky-Golay filter
+    savgol_order : int, optional
+        Polynomial order for Savitzky-Golay filter
+    xlim : tuple, optional
+        X-axis limits
+    """
+    if not df_dict or keys.size == 0:
+        print("No data to plot")
+        return
+        
+    # Create figure with subplots
+    rows = int(np.ceil(len(keys) / 2))
+    fig, axes = plt.subplots(rows, 2, figsize=(12, 4*rows))
+    
+    # Handle single subplot case
+    if len(keys) == 1:
+        axes = np.array([axes])
+        
+    # Flatten axes for easier iteration
+    axes = axes.flatten()
+    
+    # Plot smoothed data for each key
+    for i, key in enumerate(keys):
+        if i < len(axes):
+            df = df_dict[key]
+            x_col, y_col = df.columns[0], df.columns[1]
+            
+            x_data = df[x_col].values
+            y_data = df[y_col].values
+            y_data = y_data - BACKGROUND_SCALE * np.max(y_data)
+            
+            # Apply smoothing
+            _, y_smoothed = smooth_data(x_data, y_data, 
+                                        moving_avg_window=moving_avg_window,
+                                        savgol_window=savgol_window, 
+                                        savgol_order=savgol_order)
+            
+            # Plot original data
+            axes[i].plot(x_data, y_data, 'k-', alpha=0.3, label='Original')
+            
+            # Plot smoothed data
+            axes[i].plot(x_data, y_smoothed, 'r-', label='Smoothed')
+            
+            axes[i].set_title(f"Smoothed Data for {key}uW")
+            axes[i].set_xlabel("Wavelength (μm)")
+            axes[i].set_ylabel("Intensity (a.u.)")
+            axes[i].set_xlim(xlim)
+            axes[i].legend(loc='best')
+            axes[i].grid(True, linestyle='--', alpha=0.7)
+            
+            # Use ScalarFormatter for scientific notation
+            axes[i].yaxis.set_major_formatter(ScalarFormatter(useMathText=True))
+            axes[i].ticklabel_format(style='sci', axis='y', scilimits=(0,0))
+    
+    # Hide unused subplots
+    for i in range(len(keys), len(axes)):
+        axes[i].set_visible(False)
+    
+    plt.tight_layout()
+    plt.show()
+
+def fit_gaussian_model(df, key, moving_avg_window=MOVING_AVG_WINDOW_SIZE, 
+                      savgol_window=SAVGOL_WINDOW_SIZE, savgol_order=SAVGOL_POLY_ORDER,
+                      background_scale=BACKGROUND_SCALE, xlim=DEFAULT_XLIM):
+    """
+    Fit two Gaussian curves to the data and plot the results.
+    
+    Parameters:
+    -----------
+    df : DataFrame
+        Data to fit
+    key : str
+        Key identifier for the dataset
+    moving_avg_window : int, optional
+        Window size for moving average
+    savgol_window : int, optional
+        Window size for Savitzky-Golay filter
+    savgol_order : int, optional
+        Polynomial order for Savitzky-Golay filter
+    background_scale : float, optional
+        Scaling factor for background subtraction
+    xlim : tuple, optional
+        X-axis limits
+        
+    Returns:
+    --------
+    tuple
+        (optimal_parameters, covariance_matrix)
+    """
+    x_col, y_col = df.columns[0], df.columns[1]
+    x_data = df[x_col].values
+    y_data = df[y_col].values
+    y_data = y_data - background_scale * np.max(y_data)
+    
+    # Apply smoothing
+    _, y_smoothed = smooth_data(x_data, y_data, 
+                              moving_avg_window=moving_avg_window,
+                              savgol_window=savgol_window, 
+                              savgol_order=savgol_order)
+    
+    # Background subtraction
+    y_adjusted = y_smoothed - background_scale * np.max(y_smoothed)
+    
+    # Initial guesses based on data characteristics
+    x_min, x_max = np.min(x_data), np.max(x_data)
+    x_range = x_max - x_min
+    x_mid = x_min + x_range/2
+    
+    # Estimate parameters for two Gaussians
+    initial_guesses = [-1.7, 0.074, 0.001, -3.5, 0.0787, 0.001]
+    # Parameter bounds to constrain the fit
+    bounds = (
+        [-np.inf, x_min, 0, -np.inf, x_min, 0],  # Lower bounds
+        [0, x_max, np.inf, 0, x_max, np.inf]     # Upper bounds
+    )
+    
+    try:
+        # Fit the model
+        popt, pcov = curve_fit(two_gaussians, x_data, y_adjusted, 
+                             p0=initial_guesses, 
+                             bounds=bounds,
+                             maxfev=10000)  # Increase max iterations
+        
+        # Generate points for smooth curve
+        x_fine = np.linspace(x_min, x_max, 1000)
+        y_fitted = two_gaussians(x_fine, *popt)
+        
+        # Individual Gaussian components
+        gaussian1 = popt[0] * np.exp(-(x_fine - popt[1])**2 / (2 * popt[2]**2))
+        gaussian2 = popt[3] * np.exp(-(x_fine - popt[4])**2 / (2 * popt[5]**2))
+        
+        # Calculate confidence intervals (95%)
+        perr = np.sqrt(np.diag(pcov))
+        
+        # Plotting
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        # Plot original and smoothed data
+        ax.plot(x_data, y_data, 'k-', alpha=0.3, label='Original Data')
+        ax.plot(x_data, y_adjusted, 'b-', label='Adjusted Smoothed Data')
+        
+        # Plot fitted model
+        ax.plot(x_fine, y_fitted, 'r-', linewidth=2, label='Fitted Model')
+        
+        # Plot individual components
+        ax.plot(x_fine, gaussian1, 'g--', label='Gaussian 1')
+        ax.plot(x_fine, gaussian2, 'm--', label='Gaussian 2')
+        
+        # Add text with fitting parameters
+        param_text = f"Gaussian 1: A={popt[0]:.3f}±{perr[0]:.3f}, μ={popt[1]:.5f}±{perr[1]:.5f}, σ={popt[2]:.5f}±{perr[2]:.5f}\n"
+        param_text += f"Gaussian 2: A={popt[3]:.3f}±{perr[3]:.3f}, μ={popt[4]:.5f}±{perr[4]:.5f}, σ={popt[5]:.5f}±{perr[5]:.5f}"
+        
+        # Add text box with parameters
+        props = dict(boxstyle='round', facecolor='wheat', alpha=0.5)
+        ax.text(0.05, 0.05, param_text, transform=ax.transAxes, fontsize=9,
+                verticalalignment='bottom', bbox=props)
+        
+        ax.set_title(f"Gaussian Fit for {key}uW Dataset")
+        ax.set_xlabel("Wavelength (μm)")
+        ax.set_ylabel("Intensity (a.u.)")
+        ax.set_xlim(xlim)
+        ax.grid(True, linestyle='--', alpha=0.7)
+        ax.legend(loc='upper right')
+        
+        # Use ScalarFormatter for scientific notation
+        ax.yaxis.set_major_formatter(ScalarFormatter(useMathText=True))
+        ax.ticklabel_format(style='sci', axis='y', scilimits=(0,0))
+        
+        plt.tight_layout()
+        plt.show()
+        
+        return popt, pcov
+        
+    except Exception as e:
+        print(f"Error fitting Gaussian model: {str(e)}")
+        return None, None
+
+def extract_fine_peaks(df, key, popt=None, moving_avg_window=MOVING_AVG_WINDOW_SIZE, 
+                      savgol_window=SAVGOL_WINDOW_SIZE, savgol_order=SAVGOL_POLY_ORDER,
+                      background_scale=BACKGROUND_SCALE, xlim=DEFAULT_XLIM):
+    """
+    Extract fine peaks by subtracting broad Gaussian background.
+    
+    Parameters:
+    -----------
+    df : DataFrame
+        Data to process
+    key : str
+        Key identifier for the dataset
+    popt : array-like, optional
+        Pre-computed optimal parameters (if None, will fit)
+    moving_avg_window : int, optional
+        Window size for moving average
+    savgol_window : int, optional
+        Window size for Savitzky-Golay filter
+    savgol_order : int, optional
+        Polynomial order for Savitzky-Golay filter
+    background_scale : float, optional
+        Scaling factor for background subtraction
+    xlim : tuple, optional
+        X-axis limits
+        
+    Returns:
+    --------
+    DataFrame
+        DataFrame with extracted fine peaks
+    """
+    x_col, y_col = df.columns[0], df.columns[1]
+    x_data = df[x_col].values
+    y_data = df[y_col].values
+    y_data = y_data - background_scale * np.max(y_data)
+    
+    # If parameters not provided, fit the model
+    if popt is None:
+        # Apply smoothing
+        _, y_smoothed = smooth_data(x_data, y_data, 
+                                  moving_avg_window=moving_avg_window,
+                                  savgol_window=savgol_window, 
+                                  savgol_order=savgol_order)
+        
+        # Background subtraction
+        y_adjusted = y_smoothed - background_scale * np.max(y_smoothed)
+        
+        # Initial guesses based on data characteristics
+        x_min, x_max = np.min(x_data), np.max(x_data)
+        x_range = x_max - x_min
+        
+        # Estimate parameters for two Gaussians
+        initial_guesses = [
+            # A1, mu1, sigma1, A2, mu2, sigma2
+            -1.0, x_min + x_range/3, x_range/10,  # First Gaussian
+            -3.0, x_min + 2*x_range/3, x_range/10  # Second Gaussian
+        ]
+        
+        # Parameter bounds to constrain the fit
+        bounds = (
+            [-np.inf, x_min, 0, -np.inf, x_min, 0],  # Lower bounds
+            [0, x_max, np.inf, 0, x_max, np.inf]     # Upper bounds
+        )
+        
+        try:
+            # Fit the model
+            popt, _ = curve_fit(two_gaussians, x_data, y_adjusted, 
+                             p0=initial_guesses, 
+                             bounds=bounds,
+                             maxfev=10000)  # Increase max iterations
+        except Exception as e:
+            print(f"Error fitting Gaussian model: {str(e)}")
+            return None
+    
+    # Generate fitted Gaussian background
+    fitted_background = two_gaussians(x_data, *popt)
+    
+    # Subtract fitted background from original data
+    fine_peaks = y_data - fitted_background
+    
+    # Apply small amount of smoothing to the fine peaks
+    fine_peaks_smoothed = savgol_filter(fine_peaks, 
+                                       window_length=max(5, len(x_data)//500), 
+                                       polyorder=2)
+    
+    # Detect peaks in the fine structure
+    peak_indices, peak_properties = find_peaks(fine_peaks_smoothed, 
+                                             height=0.1*np.max(fine_peaks_smoothed),
+                                             distance=len(x_data)//100)
+    
+    # Create DataFrame with fine peaks
+    fine_peaks_df = pd.DataFrame({
+        'Wavelength': x_data,
+        'Fine_Peaks': fine_peaks,
+        'Fine_Peaks_Smoothed': fine_peaks_smoothed
+    })
+    
+    # Plot results
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10), sharex=True)
+    
+    # First subplot: Original data, smoothed, and fitted background
+    ax1.plot(x_data, y_data, 'k-', alpha=0.5, label='Original Data')
+    ax1.plot(x_data, fitted_background, 'r-', label='Fitted Background')
+    
+    # Second subplot: Extracted fine peaks
+    ax2.plot(x_data, fine_peaks, 'k-', alpha=0.5, label='Fine Peaks')
+    ax2.plot(x_data, fine_peaks_smoothed, 'g-', label='Smoothed Fine Peaks')
+    
+    # Mark detected peaks
+    ax2.plot(x_data[peak_indices], fine_peaks_smoothed[peak_indices], 'ro', label='Detected Peaks')
+    
+    # For each peak, add a vertical line and label
+    for i, idx in enumerate(peak_indices):
+        ax2.axvline(x=x_data[idx], color='r', linestyle='--', alpha=0.3)
+        ax2.annotate(f"{x_data[idx]:.5f}", 
+                   xy=(x_data[idx], fine_peaks_smoothed[idx]),
+                   xytext=(5, 5), textcoords='offset points',
+                   fontsize=8)
+    
+    ax1.set_title(f"Background Subtraction for {key}uW Dataset")
+    ax1.set_ylabel("Intensity (a.u.)")
+    ax1.legend(loc='best')
+    ax1.grid(True, linestyle='--', alpha=0.7)
+    
+    ax2.set_title(f"Extracted Fine Peaks for {key}uW Dataset")
+    ax2.set_xlabel("Wavelength (μm)")
+    ax2.set_ylabel("Intensity (a.u.)")
+    ax2.legend(loc='best')
+    ax2.grid(True, linestyle='--', alpha=0.7)
+    
+    # Set x-axis limits
+    ax1.set_xlim(xlim)
+    
+    # Use ScalarFormatter for scientific notation
+    ax1.yaxis.set_major_formatter(ScalarFormatter(useMathText=True))
+    ax1.ticklabel_format(style='sci', axis='y', scilimits=(0,0))
+    ax2.yaxis.set_major_formatter(ScalarFormatter(useMathText=True))
+    ax2.ticklabel_format(style='sci', axis='y', scilimits=(0,0))
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # Peak statistics
+    if len(peak_indices) > 0:
+        print(f"\nDetected {len(peak_indices)} peaks in fine structure:")
+        for i, idx in enumerate(peak_indices):
+            print(f"Peak {i+1}: Wavelength = {x_data[idx]:.5f} μm, Intensity = {fine_peaks_smoothed[idx]:.5f}")
+    
+    return fine_peaks_df
+
+def process_all_datasets(folder_path, output_folder=None):
+    """
+    Process all datasets in a folder.
+    
+    Parameters:
+    -----------
+    folder_path : str
+        Path to the folder containing data files
+    output_folder : str, optional
+        Path to save output files (default: None, creates subfolder in folder_path)
+    """
+    # Load all data files
+    print(f"Loading data from {folder_path}...")
+    df_dict = load_data_files(folder_path)
+    
+    if not df_dict:
+        print("No data files could be loaded. Exiting.")
+        return
+    
+    print(f"Loaded {len(df_dict)} datasets.")
+    
+    # Create output folder if needed
+    if output_folder is None:
+        output_folder = os.path.join(folder_path, "processed_data")
+    
+    os.makedirs(output_folder, exist_ok=True)
+    
+    # Plot raw data from random samples
+    print("\nPlotting raw data samples...")
+    selected_keys = plot_raw_data(df_dict)
+    
+    # Plot smoothed data
+    print("\nPlotting smoothed data...")
+    plot_smoothed_data(df_dict, selected_keys)
+    
+    # Process each dataset
+    for key in selected_keys:
+        print(f"\nProcessing dataset for {key}uW...")
+        
+        # Fit Gaussian model
+        popt, _ = fit_gaussian_model(df_dict[key], key)
+        
+        if popt is not None:
+            # Extract fine peaks
+            fine_peaks_df = extract_fine_peaks(df_dict[key], key, popt)
+            
+            if fine_peaks_df is not None:
+                # Save processed data
+                output_file = os.path.join(output_folder, f"fine_peaks_{key}uW.csv")
+                fine_peaks_df.to_csv(output_file, index=False)
+                print(f"Saved processed data to {output_file}")
+
+# Main function to orchestrate the workflow
+def main():
+    """Main function to run the spectroscopy data analysis."""
+    # Set folder path
+    folder_path = input("Enter the folder path containing CSV files: ")
+    
+    if not os.path.exists(folder_path):
+        print(f"Error: Folder {folder_path} does not exist.")
+        return
+    
+    # Process all datasets
+    process_all_datasets(folder_path)
+    
+    print("\nData processing complete!")
+
+# Run the main function if script is executed directly
+if __name__ == "__main__":
+    # Set random seed for reproducibility
+    np.random.seed(42)
+    
+    # Call the main function
+    main()
