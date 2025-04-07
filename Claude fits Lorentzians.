@@ -1,0 +1,601 @@
+# ----- Method 1: Direct FWHM Calculation from Data Points -----
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.signal import find_peaks, savgol_filter
+from scipy.interpolate import interp1d
+
+def calculate_fwhm_from_data(x_data, y_data, peaks_indices, prominence_factor=0.5, 
+                             smoothing=True, smooth_window=51, smooth_poly=3, 
+                             interpolate=True, interp_factor=10):
+    """
+    Calculate FWHM directly from data points by finding the width at half maximum height.
+    
+    Parameters:
+    x_data: Frequency or wavelength values
+    y_data: Intensity or amplitude values 
+    peaks_indices: Indices of detected peaks
+    prominence_factor: Factor to use for peak prominence detection
+    smoothing: Whether to smooth the data before analysis
+    smooth_window: Window size for Savitzky-Golay filter
+    smooth_poly: Polynomial order for Savitzky-Golay filter
+    interpolate: Whether to use interpolation for more precise half-max positions
+    interp_factor: Interpolation factor to increase resolution
+    
+    Returns:
+    Dictionary with peak info including positions and FWHMs
+    """
+    results = []
+    
+    # Apply smoothing if requested
+    if smoothing:
+        # Ensure window size is odd and not too large for data
+        if smooth_window > len(y_data) - 2:
+            smooth_window = min(51, len(y_data) - 3 if len(y_data) > 3 else 3)
+        if smooth_window % 2 == 0:
+            smooth_window -= 1
+        y_smooth = savgol_filter(y_data, smooth_window, smooth_poly)
+    else:
+        y_smooth = y_data
+    
+    for peak_idx in peaks_indices:
+        # Skip if peak is at the edge of data range
+        if peak_idx <= 5 or peak_idx >= len(y_smooth) - 5:
+            print(f"Skipping peak at index {peak_idx} - too close to data edge")
+            continue
+        
+        peak_height = y_smooth[peak_idx]
+        half_max = peak_height / 2
+        
+        # Find left intersection (going backward from peak)
+        left_idx = peak_idx
+        while left_idx > 0 and y_smooth[left_idx] > half_max:
+            left_idx -= 1
+        
+        # Find right intersection (going forward from peak)
+        right_idx = peak_idx
+        while right_idx < len(y_smooth) - 1 and y_smooth[right_idx] > half_max:
+            right_idx += 1
+        
+        # Skip if we hit the edge
+        if left_idx == 0 or right_idx == len(y_smooth) - 1:
+            print(f"Skipping peak at {x_data[peak_idx]:.6f} - half max points reach data edge")
+            continue
+            
+        # Interpolate for more precise half-max positions
+        if interpolate and left_idx > 0 and right_idx < len(y_smooth) - 1:
+            # For left side
+            x_left = [x_data[left_idx-1], x_data[left_idx], x_data[left_idx+1]]
+            y_left = [y_smooth[left_idx-1], y_smooth[left_idx], y_smooth[left_idx+1]]
+            left_interp = interp1d(y_left, x_left, kind='linear', bounds_error=False)
+            left_x_interp = left_interp(half_max)
+            
+            # For right side
+            x_right = [x_data[right_idx-1], x_data[right_idx], x_data[right_idx+1]]
+            y_right = [y_smooth[right_idx-1], y_smooth[right_idx], y_smooth[right_idx+1]]
+            right_interp = interp1d(y_right, x_right, kind='linear', bounds_error=False)
+            right_x_interp = right_interp(half_max)
+            
+            # Use interpolated values if valid
+            if left_x_interp is not None and right_x_interp is not None:
+                fwhm = right_x_interp - left_x_interp
+                left_pos = left_x_interp
+                right_pos = right_x_interp
+            else:
+                fwhm = x_data[right_idx] - x_data[left_idx]
+                left_pos = x_data[left_idx]
+                right_pos = x_data[right_idx]
+        else:
+            fwhm = x_data[right_idx] - x_data[left_idx]
+            left_pos = x_data[left_idx]
+            right_pos = x_data[right_idx]
+        
+        # Store results
+        results.append({
+            'peak_idx': peak_idx,
+            'peak_position': x_data[peak_idx],
+            'peak_height': peak_height,
+            'fwhm': fwhm,
+            'left_half_max_pos': left_pos,
+            'right_half_max_pos': right_pos
+        })
+    
+    return results
+
+def analyze_peaks_direct(x_data, y_data, min_prominence=0.1, min_distance=20, 
+                         plot_results=True, **fwhm_kwargs):
+    """
+    Complete peak analysis workflow using direct FWHM calculation
+    
+    Parameters:
+    x_data: x-values (frequency, wavelength, etc.)
+    y_data: y-values (intensity, amplitude, etc.)
+    min_prominence: Minimum peak prominence relative to max signal
+    min_distance: Minimum samples between adjacent peaks
+    plot_results: Whether to generate visualization plot
+    fwhm_kwargs: Additional arguments for FWHM calculation function
+    
+    Returns:
+    List of dictionaries with peak information
+    """
+    # Normalize data for peak finding
+    y_norm = (y_data - np.min(y_data)) / (np.max(y_data) - np.min(y_data))
+    
+    # Find peaks 
+    peaks, properties = find_peaks(y_norm, 
+                                   prominence=min_prominence,
+                                   distance=min_distance)
+    
+    print(f"Found {len(peaks)} peaks")
+    
+    # Calculate FWHM for each peak
+    results = calculate_fwhm_from_data(x_data, y_data, peaks, **fwhm_kwargs)
+    
+    # Plot results if requested
+    if plot_results and len(results) > 0:
+        plt.figure(figsize=(12, 8))
+        plt.plot(x_data, y_data, 'b-', label='Raw Data')
+        
+        # Plot smoothed data if smoothing was applied
+        if fwhm_kwargs.get('smoothing', True):
+            smooth_window = fwhm_kwargs.get('smooth_window', 51)
+            smooth_poly = fwhm_kwargs.get('smooth_poly', 3)
+            if smooth_window > len(y_data) - 2:
+                smooth_window = min(51, len(y_data) - 3 if len(y_data) > 3 else 3)
+            if smooth_window % 2 == 0:
+                smooth_window -= 1
+            y_smooth = savgol_filter(y_data, smooth_window, smooth_poly)
+            plt.plot(x_data, y_smooth, 'g-', label='Smoothed Data')
+        
+        # Mark peaks and FWHM ranges
+        for result in results:
+            peak_idx = result['peak_idx']
+            peak_pos = result['peak_position']
+            peak_height = result['peak_height']
+            left_pos = result['left_half_max_pos']
+            right_pos = result['right_half_max_pos']
+            fwhm = result['fwhm']
+            
+            # Mark peak
+            plt.plot(peak_pos, peak_height, 'ro')
+            plt.text(peak_pos, peak_height*1.05, 
+                     f"{peak_pos:.4f}\nFWHM: {fwhm:.4f}", 
+                     ha='center', va='bottom')
+            
+            # Draw horizontal line at half max
+            plt.plot([left_pos, right_pos], [peak_height/2, peak_height/2], 'r-')
+            
+            # Mark half-max positions
+            plt.plot([left_pos, left_pos], [0, peak_height/2], 'r--')
+            plt.plot([right_pos, right_pos], [0, peak_height/2], 'r--')
+            
+        plt.grid(True)
+        plt.xlabel('Frequency (GHz)')
+        plt.ylabel('Intensity')
+        plt.title('Direct FWHM Calculation from Data Points')
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
+        
+    # Print results
+    print("\nDirect FWHM Results:")
+    for i, result in enumerate(results):
+        print(f"Peak {i+1} at {result['peak_position']:.6f}: FWHM = {result['fwhm']:.6f}")
+        
+    return results
+
+# Example usage for Method 1:
+# Assuming x_subset and mag_subset[B] are your data
+# result = analyze_peaks_direct(
+#    x_subset, 
+#    mag_subset[magnetic_fields[0]], 
+#    min_prominence=0.2,
+#    min_distance=50,
+#    plot_results=True,
+#    smoothing=True,
+#    smooth_window=51,
+#    interpolate=True
+# )
+
+
+# ----- Method 2: FWHM from Lorentzian Curve Fitting -----
+from scipy.optimize import curve_fit
+
+def lorentzian(x, x0, gamma, A, y0):
+    """
+    Lorentzian peak function.
+    
+    Parameters:
+    x0: Peak center position
+    gamma: Half-width at half-maximum
+    A: Peak amplitude
+    y0: Baseline offset
+    """
+    return A * (gamma**2 / ((x - x0)**2 + gamma**2)) + y0
+
+def asymmetric_lorentzian(x, x0, gamma, A, y0, asym):
+    """
+    Asymmetric Lorentzian function.
+    
+    Parameters:
+    x0: Peak center position
+    gamma: Half-width at half-maximum
+    A: Peak amplitude
+    y0: Baseline offset
+    asym: Asymmetry parameter
+    """
+    # Calculate the standard Lorentzian
+    lorentz = gamma**2 / ((x - x0)**2 + gamma**2)
+    
+    # Add asymmetry factor
+    asym_factor = 1 + asym * np.tanh((x - x0) / gamma)
+    return A * lorentz * asym_factor + y0
+
+def fit_peaks_with_lorentzian(x_data, y_data, peaks_indices, fit_window=50, 
+                              use_asymmetric=True, plot_individual=False):
+    """
+    Fit detected peaks with Lorentzian curves.
+    
+    Parameters:
+    x_data: x-values (frequency, wavelength, etc.)
+    y_data: y-values (intensity, amplitude, etc.)
+    peaks_indices: Indices of detected peaks
+    fit_window: Number of points to include on each side of peak for fitting
+    use_asymmetric: Whether to use asymmetric Lorentzian function
+    plot_individual: Whether to plot individual peak fits
+    
+    Returns:
+    List of dictionaries with peak fitting results
+    """
+    results = []
+    
+    for i, peak_idx in enumerate(peaks_indices):
+        # Skip if peak is too close to the edge
+        if peak_idx <= fit_window or peak_idx >= len(y_data) - fit_window:
+            print(f"Skipping peak at index {peak_idx} - too close to data edge")
+            continue
+        
+        # Extract data region for fitting
+        left_idx = max(0, peak_idx - fit_window)
+        right_idx = min(len(y_data), peak_idx + fit_window)
+        
+        x_fit = x_data[left_idx:right_idx]
+        y_fit = y_data[left_idx:right_idx]
+        
+        # Initial parameter guesses
+        x0_guess = x_data[peak_idx]  # Peak position
+        y_max = y_data[peak_idx]     # Peak height
+        y_min = np.min(y_fit)        # Baseline estimate
+        
+        # Estimate initial gamma (half width)
+        half_max = (y_max + y_min) / 2
+        left_half = peak_idx
+        while left_half > left_idx and y_data[left_half] > half_max:
+            left_half -= 1
+        
+        right_half = peak_idx
+        while right_half < right_idx and y_data[right_half] > half_max:
+            right_half += 1
+            
+        gamma_guess = (x_data[right_half] - x_data[left_half]) / 2
+        
+        try:
+            if use_asymmetric:
+                # Initial parameters for asymmetric Lorentzian
+                p0 = [x0_guess, gamma_guess, y_max - y_min, y_min, 0.0]
+                
+                # Set bounds for parameters
+                bounds = (
+                    [x0_guess - 0.05, 0.0001, 0, -np.inf, -0.9],  # Lower bounds
+                    [x0_guess + 0.05, 0.05, np.inf, np.inf, 0.9]  # Upper bounds
+                )
+                
+                # Fit asymmetric Lorentzian
+                popt, pcov = curve_fit(
+                    asymmetric_lorentzian, 
+                    x_fit, 
+                    y_fit, 
+                    p0=p0,
+                    bounds=bounds,
+                    maxfev=10000
+                )
+                
+                # Extract fit parameters
+                x0, gamma, A, y0, asym = popt
+                
+                # Extract uncertainties
+                perr = np.sqrt(np.diag(pcov))
+                x0_err, gamma_err, A_err, y0_err, asym_err = perr
+                
+                # Calculate FWHM (with correction for asymmetry)
+                fwhm = 2 * gamma * (1 + 0.2 * abs(asym))
+                
+                # Generate fitted curve for plotting
+                x_dense = np.linspace(min(x_fit), max(x_fit), 1000)
+                y_fit_curve = asymmetric_lorentzian(x_dense, *popt)
+                
+                # Calculate R-squared
+                y_pred = asymmetric_lorentzian(x_fit, *popt)
+                ss_res = np.sum((y_fit - y_pred)**2)
+                ss_tot = np.sum((y_fit - np.mean(y_fit))**2)
+                r_squared = 1 - (ss_res / ss_tot)
+                
+                # Store results
+                results.append({
+                    'peak_idx': peak_idx,
+                    'peak_position': x0,
+                    'peak_position_err': x0_err,
+                    'fwhm': fwhm,
+                    'gamma': gamma, 
+                    'gamma_err': gamma_err,
+                    'amplitude': A,
+                    'baseline': y0,
+                    'asymmetry': asym,
+                    'asymmetry_err': asym_err,
+                    'r_squared': r_squared,
+                    'x_fit': x_fit,
+                    'y_fit': y_fit,
+                    'x_dense': x_dense,
+                    'y_fit_curve': y_fit_curve
+                })
+                
+            else:
+                # Initial parameters for symmetric Lorentzian
+                p0 = [x0_guess, gamma_guess, y_max - y_min, y_min]
+                
+                # Set bounds for parameters
+                bounds = (
+                    [x0_guess - 0.05, 0.0001, 0, -np.inf],  # Lower bounds
+                    [x0_guess + 0.05, 0.05, np.inf, np.inf]  # Upper bounds
+                )
+                
+                # Fit symmetric Lorentzian
+                popt, pcov = curve_fit(
+                    lorentzian, 
+                    x_fit, 
+                    y_fit, 
+                    p0=p0,
+                    bounds=bounds,
+                    maxfev=10000
+                )
+                
+                # Extract fit parameters
+                x0, gamma, A, y0 = popt
+                
+                # Extract uncertainties
+                perr = np.sqrt(np.diag(pcov))
+                x0_err, gamma_err, A_err, y0_err = perr
+                
+                # Calculate FWHM (for symmetric Lorentzian, FWHM = 2*gamma)
+                fwhm = 2 * gamma
+                
+                # Generate fitted curve for plotting
+                x_dense = np.linspace(min(x_fit), max(x_fit), 1000)
+                y_fit_curve = lorentzian(x_dense, *popt)
+                
+                # Calculate R-squared
+                y_pred = lorentzian(x_fit, *popt)
+                ss_res = np.sum((y_fit - y_pred)**2)
+                ss_tot = np.sum((y_fit - np.mean(y_fit))**2)
+                r_squared = 1 - (ss_res / ss_tot)
+                
+                # Store results
+                results.append({
+                    'peak_idx': peak_idx,
+                    'peak_position': x0,
+                    'peak_position_err': x0_err,
+                    'fwhm': fwhm,
+                    'gamma': gamma, 
+                    'gamma_err': gamma_err,
+                    'amplitude': A,
+                    'baseline': y0,
+                    'asymmetry': 0.0,  # Symmetric case
+                    'asymmetry_err': 0.0,
+                    'r_squared': r_squared,
+                    'x_fit': x_fit,
+                    'y_fit': y_fit,
+                    'x_dense': x_dense,
+                    'y_fit_curve': y_fit_curve
+                })
+            
+            # Plot individual fit if requested
+            if plot_individual:
+                plt.figure(figsize=(10, 6))
+                plt.plot(x_fit, y_fit, 'bo', label='Data')
+                plt.plot(results[-1]['x_dense'], results[-1]['y_fit_curve'], 'r-', label='Lorentzian Fit')
+                plt.axvline(x=x0, color='g', linestyle='--', label=f'Center: {x0:.6f}')
+                
+                # Draw horizontal line at half max height for FWHM visualization
+                half_max_y = y0 + A/2
+                plt.axhline(y=half_max_y, color='k', linestyle=':', alpha=0.5)
+                
+                # Calculate x positions at half max
+                if use_asymmetric:
+                    # Need to find intersection points numerically for asymmetric case
+                    fit_func = lambda x: asymmetric_lorentzian(x, *popt) - half_max_y
+                    from scipy.optimize import fsolve
+                    
+                    # Need good initial guesses for fsolve
+                    left_guess = x0 - gamma
+                    right_guess = x0 + gamma
+                    
+                    left_x = fsolve(fit_func, left_guess)[0]
+                    right_x = fsolve(fit_func, right_guess)[0]
+                else:
+                    # For symmetric Lorentzian, half max points are at x0 ± gamma
+                    left_x = x0 - gamma
+                    right_x = x0 + gamma
+                
+                plt.axvline(x=left_x, color='k', linestyle='--', alpha=0.5)
+                plt.axvline(x=right_x, color='k', linestyle='--', alpha=0.5)
+                
+                plt.grid(True)
+                plt.title(f"Peak {i+1} - FWHM: {fwhm:.6f} GHz")
+                plt.xlabel('Frequency (GHz)')
+                plt.ylabel('Intensity')
+                plt.legend()
+                plt.tight_layout()
+                plt.show()
+                
+        except Exception as e:
+            print(f"Error fitting peak at {x_data[peak_idx]:.6f}: {str(e)}")
+    
+    return results
+
+def analyze_peaks_lorentzian(x_data, y_data, min_prominence=0.1, min_distance=20, 
+                             plot_results=True, **fit_kwargs):
+    """
+    Complete peak analysis workflow using Lorentzian curve fitting
+    
+    Parameters:
+    x_data: x-values (frequency, wavelength, etc.)
+    y_data: y-values (intensity, amplitude, etc.)
+    min_prominence: Minimum peak prominence relative to max signal
+    min_distance: Minimum samples between adjacent peaks
+    plot_results: Whether to generate visualization plot
+    fit_kwargs: Additional arguments for Lorentzian fitting function
+    
+    Returns:
+    List of dictionaries with peak fitting results
+    """
+    # Normalize data for peak finding
+    y_norm = (y_data - np.min(y_data)) / (np.max(y_data) - np.min(y_data))
+    
+    # Find peaks 
+    peaks, properties = find_peaks(y_norm, 
+                                   prominence=min_prominence,
+                                   distance=min_distance)
+    
+    print(f"Found {len(peaks)} peaks")
+    
+    # Fit peaks with Lorentzian
+    results = fit_peaks_with_lorentzian(x_data, y_data, peaks, **fit_kwargs)
+    
+    # Plot overall results if requested
+    if plot_results and results:
+        plt.figure(figsize=(12, 8))
+        plt.plot(x_data, y_data, 'b-', alpha=0.7, label='Data')
+        
+        # Plot all fitted peaks
+        x_all = np.linspace(min(x_data), max(x_data), 10000)
+        y_combined = np.zeros_like(x_all)
+        
+        for result in results:
+            # Extract parameters
+            x0 = result['peak_position']
+            gamma = result['gamma']
+            A = result['amplitude']
+            y0 = result['baseline']
+            asym = result['asymmetry']
+            
+            # Generate individual peak curve
+            if abs(asym) > 0.001:  # Asymmetric case
+                y_peak = asymmetric_lorentzian(x_all, x0, gamma, A, y0, asym)
+            else:  # Symmetric case
+                y_peak = lorentzian(x_all, x0, gamma, A, y0)
+            
+            # Add to combined curve
+            y_combined += y_peak - y0  # Subtract baseline to avoid double counting
+            
+            # Plot individual peak fit
+            plt.plot(result['x_dense'], result['y_fit_curve'], '--', alpha=0.7)
+            
+            # Annotate peak
+            plt.annotate(f"FWHM: {result['fwhm']:.4f}",
+                         xy=(x0, A+y0),
+                         xytext=(0, 10),
+                         textcoords='offset points',
+                         ha='center',
+                         arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0'))
+        
+        # Add baseline to combined curve (just once)
+        if results:
+            y_combined += results[0]['baseline']
+            
+        # Plot combined fit curve
+        plt.plot(x_all, y_combined, 'r-', linewidth=2, label='Combined Fit')
+        
+        plt.grid(True)
+        plt.xlabel('Frequency (GHz)')
+        plt.ylabel('Intensity')
+        plt.title('Lorentzian Curve Fitting for FWHM Analysis')
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
+        
+    # Print results
+    print("\nLorentzian Fit FWHM Results:")
+    for i, result in enumerate(results):
+        print(f"Peak {i+1} at {result['peak_position']:.6f}: FWHM = {result['fwhm']:.6f}, R² = {result['r_squared']:.4f}")
+        if 'asymmetry' in result and abs(result['asymmetry']) > 0.05:
+            print(f"  Note: Asymmetry detected: {result['asymmetry']:.4f} ± {result['asymmetry_err']:.4f}")
+        
+    return results
+
+# Example usage for Method 2:
+# Assuming x_subset and mag_subset[B] are your data
+# results = analyze_peaks_lorentzian(
+#     x_subset, 
+#     mag_subset[magnetic_fields[0]], 
+#     min_prominence=0.2,
+#     min_distance=50,
+#     plot_results=True,
+#     fit_window=100,
+#     use_asymmetric=True,
+#     plot_individual=True
+# )
+
+
+# ----- Integration with Existing Analysis Pipeline -----
+def analyze_all_peaks_in_dataset(x_subset, mag_subset, magnetic_fields, method='direct'):
+    """
+    Analyze all peaks for all magnetic field values using the specified method
+    
+    Parameters:
+    x_subset: x-values (frequency)
+    mag_subset: Dictionary of y-values for each magnetic field
+    magnetic_fields: List of magnetic field values
+    method: 'direct' or 'lorentzian'
+    
+    Returns:
+    Dictionary of results for each magnetic field
+    """
+    all_results = {}
+    
+    for B in magnetic_fields:
+        if B in mag_subset:
+            print(f"\nAnalyzing magnetic field B = {B}")
+            
+            if method == 'direct':
+                # Use direct FWHM calculation
+                results = analyze_peaks_direct(
+                    x_subset, 
+                    mag_subset[B],
+                    min_prominence=0.2,  # Adjust as needed
+                    min_distance=50,     # Adjust as needed
+                    plot_results=True,
+                    smoothing=True,
+                    smooth_window=51,
+                    interpolate=True
+                )
+            else:
+                # Use Lorentzian fitting
+                results = analyze_peaks_lorentzian(
+                    x_subset, 
+                    mag_subset[B], 
+                    min_prominence=0.2,  # Adjust as needed
+                    min_distance=50,     # Adjust as needed
+                    plot_results=True,
+                    fit_window=100,      # Adjust as needed
+                    use_asymmetric=True
+                )
+                
+            all_results[B] = results
+            
+    return all_results
+
+# Example usage to analyze all datasets:
+# Direct method
+# direct_results = analyze_all_peaks_in_dataset(x_subset, mag_subset, magnetic_fields, method='direct')
+
+# Lorentzian fitting method
+# lorentzian_results = analyze_all_peaks_in_dataset(x_subset, mag_subset, magnetic_fields, method='lorentzian')
