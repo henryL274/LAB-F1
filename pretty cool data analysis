@@ -1,0 +1,681 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Sun Apr  6 15:25:15 2025
+
+@author: hannanasir
+"""
+#C2 = b = indigo
+
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import curve_fit
+from scipy.signal import find_peaks, savgol_filter
+
+# ---- Moving Average Function ----
+def moving_average(data, window_size=50):
+    return np.convolve(data, np.ones(window_size) / window_size, mode='same')
+
+# ---- Load Common Data ----
+reference_file = "/Users/hannanasir/Desktop/Laser SPEC/LAB D2/NEW/BROADEST.CSV"
+t_ref, C33, fab = np.loadtxt(reference_file, skiprows=1, delimiter=",", unpack=True)
+
+# ---- Convert Time to Frequency (similar to your first code section) ----
+SPEED_OF_LIGHT = 3.0e8  # m/s
+CAVITY_LENGTH = 0.2  # meters
+FSR = SPEED_OF_LIGHT / (4 * CAVITY_LENGTH)  # Free Spectral Range (Hz)
+f0 = 384000e9  # Approximate starting frequency
+
+# Detect peaks to assign frequencies
+peaks, _ = find_peaks(fab, height=0.5 * np.max(fab), distance=len(t_ref)//100)
+peak_times = t_ref[peaks]
+peak_frequencies = f0 + np.arange(len(peak_times)) * FSR
+
+# Fit frequency vs. time
+def linear_fit(t, a, b):
+    return a * t + b
+
+popt, _ = curve_fit(linear_fit, peak_times, peak_frequencies, 
+                    p0=[FSR / (peak_times[-1] - peak_times[0]), f0])
+a_fit, b_fit = popt
+frequency_fit = linear_fit(t_ref, a_fit, b_fit)  # Convert all time points to frequency
+
+# Convert to GHz and adjust scale
+properf = (frequency_fit / 1e9) - 384000  # Adjusting relative frequency scale
+
+# ---- Process Data for All Magnetic Fields ----
+# Scan the directory to find all available magnetic field files
+import os
+from glob import glob
+
+# Find all MAC2.CSV files in the directory
+data_files = glob("/Users/hannanasir/Desktop/Laser SPEC/LAB D2/NEW/*MAC2.CSV")
+magnetic_fields = []
+
+# Extract the magnetic field values from the filenames
+for file in data_files:
+    try:
+        # Extract filename from path and remove the "MAC2.CSV" part
+        filename = os.path.basename(file)
+        # Try to convert the remaining part to an integer
+        B_value = int(filename.replace("MAC2.CSV", ""))
+        magnetic_fields.append(B_value)
+    except ValueError:
+        # Skip files that don't match the expected pattern
+        continue
+
+# If no fields were found, fall back to the original set
+if not magnetic_fields:
+    magnetic_fields = [0, 12, 24]
+else:
+    # Sort the magnetic fields numerically
+    magnetic_fields.sort()
+
+print(f"Processing data for magnetic fields: {magnetic_fields}")
+
+background_smooth = {}
+
+for B in magnetic_fields:
+    data_file = f"/Users/hannanasir/Desktop/Laser SPEC/LAB D2/NEW/{B}MAC2.CSV"
+    try:
+        t, C = np.loadtxt(data_file, skiprows=1, delimiter=",", unpack=True)
+        
+        # Background subtraction and smoothing
+        background = C - C33
+        background_smooth[B] = moving_average(background, window_size=50)
+        print(f"Successfully loaded data for B = {B}")
+    except Exception as e:
+        print(f"Error loading data for B = {B}: {e}")
+
+# Define the subset range (adjust these indices based on where your peaks are)
+start_idx = 6000
+end_idx = 17000
+
+# For each magnetic field, we extract the relevant spectrum
+mag_subset = {}
+for B in magnetic_fields:
+    if B in background_smooth:
+        # Make sure we don't exceed array bounds
+        end = min(end_idx, len(background_smooth[B]))
+        mag_subset[B] = background_smooth[B][start_idx:end]
+
+# Extract the corresponding frequency range
+x_subset = properf[start_idx:min(end_idx, len(properf))]
+
+# ---- IMPROVED LORENTZIAN FIT FUNCTION ----
+# Adding asymmetry parameter to better model the peak shapes
+def asymmetric_lorentzian(x, x0, gamma, A, B, asym=0):
+    """
+    Asymmetric Lorentzian function with background offset.
+    
+    Parameters:
+    x0: Center frequency
+    gamma: Width parameter
+    A: Amplitude
+    B: Background offset
+    asym: Asymmetry parameter (0 for symmetric Lorentzian)
+    """
+    # Calculate the standard Lorentzian
+    lorentz = gamma**2 / ((x - x0)**2 + gamma**2)
+    
+    # Add asymmetry factor
+    if asym != 0:
+        # This adds asymmetry by modifying the shape based on which side of center we're on
+        asym_factor = 1 + asym * np.tanh((x - x0) / gamma)
+        return A * lorentz * asym_factor + B
+    else:
+        return A * lorentz + B
+
+# Function to calculate FWHM from fit parameters
+def calculate_fwhm(gamma, asym=0):
+    """Calculate FWHM for an asymmetric Lorentzian with width parameter gamma"""
+    # For small asymmetry, approximation is 2*gamma
+    # For larger asymmetry, we'd need a more complex calculation
+    return 2 * gamma * (1 + 0.2 * abs(asym))  # Approximate correction for asymmetry
+
+# Plot the data for B = 0 to identify peaks
+plt.figure(figsize=(9, 7))
+B_field = 0  # Use the first available field if 0 isn't available
+if 0 not in mag_subset and magnetic_fields:
+    B_field = magnetic_fields[0]
+
+plt.plot(x_subset, mag_subset[B_field], color = 'indigo', label=f'Hyperfine Structure For B = 0T')
+
+# Peak detection with adjusted parameters
+height_threshold = 0.00
+distance_threshold = 50
+prominence_threshold = 0.01
+
+# Apply Savitzky-Golay filter for smoother peak detection
+smooth_data = savgol_filter(mag_subset[B_field], 51, 3)
+peaks, properties = find_peaks(smooth_data, 
+                               height=height_threshold, 
+                               distance=distance_threshold, 
+                               prominence=prominence_threshold)
+
+# Mark the detected peaks
+plt.plot(x_subset[peaks], mag_subset[B_field][peaks], color = 'mediumvioletred',linestyle = 'None', marker = 'o', label='Detected Peaks')
+
+# Number the peaks on the plot for clear identification
+for i, peak in enumerate(peaks):
+    plt.annotate(f"Peak {i+1}", 
+                 (x_subset[peak], mag_subset[B_field][peak]),
+                 textcoords="offset points", 
+                 xytext=(0,5), 
+                 ha='center',
+                 fontsize = 14)
+
+#plt.title(f"Identified Peaks in Spectrum (B = {B_field})")
+plt.xlabel("Relative Frequency (GHz)", fontsize = 14)
+plt.tick_params(axis='both', labelsize=14)
+plt.ylabel("Intensity (a.u.)", fontsize = 14)
+plt.legend(fontsize = 14)
+plt.grid(True)
+plt.show()
+#%%
+
+# Find peak 6 more precisely
+# Use the frequency value around 0.61-0.62 GHz based on the figure
+target_freq = 0.61733  # Target frequency in GHz - adjusted based on your image
+peak_position = np.abs(x_subset - target_freq).argmin()
+print(f"Locating peak around {x_subset[peak_position]:.6f} GHz")
+
+# Create a detailed plot focused on peak 6
+plt.figure(figsize=(10, 8))
+
+# Define a wider window to capture the full peak
+window = 900  # Adjust as needed
+left = max(0, peak_position - window)
+right = min(len(x_subset), peak_position + window)
+
+# Extract data for fitting
+x_data = x_subset[left:right]
+y_data = mag_subset[B_field][left:right]
+
+# Plot the original data
+plt.plot(x_data, y_data, color = 'indigo', label='Data')
+plt.plot(x_subset[peak_position], mag_subset[B_field][peak_position], color = 'mediumvioletred', linestyle = 'None', marker = 'o', label='Peak Maximum')
+
+# Initial guesses for the asymmetric Lorentzian parameters
+x0_guess = x_subset[peak_position]
+gamma_guess = 0.005  # Initial guess for width in GHz
+A_guess = mag_subset[B_field][peak_position] - np.min(y_data)
+B_guess = np.min(y_data)
+asym_guess = 0  # Start with symmetric Lorentzian
+
+p0 = [x0_guess, gamma_guess, A_guess, B_guess, asym_guess]
+
+try:
+    # Perform curve fitting with asymmetric Lorentzian
+    popt, pcov = curve_fit(asymmetric_lorentzian, x_data, y_data, p0=p0, maxfev=10000)
+    x0, gamma, A, B, asym = popt
+    
+    # Calculate FWHM accounting for asymmetry
+    fwhm = calculate_fwhm(gamma, asym)
+    
+    # Calculate half maximum for visualization
+    half_max = B + A/2
+    
+    # Generate points for the fitted curve
+    fit_x = np.linspace(min(x_data), max(x_data), 1000)
+    fit_y = asymmetric_lorentzian(fit_x, *popt)
+    
+    # Find the points where the curve crosses the half maximum
+    half_max_x = []
+    for i in range(len(fit_x)-1):
+        if (fit_y[i] - half_max) * (fit_y[i+1] - half_max) <= 0:
+            # Linear interpolation to find the exact point
+            x_interp = fit_x[i] + (fit_x[i+1] - fit_x[i]) * \
+                       (half_max - fit_y[i]) / (fit_y[i+1] - fit_y[i])
+            half_max_x.append(x_interp)
+    
+    # Print detailed information about Peak 6
+    print("\n========== PEAK 6 ANALYSIS ==========")
+    print(f"Center frequency: {x0:.6f} GHz")
+    print(f"Lorentzian gamma parameter: {gamma:.6f} GHz")
+    print(f"Asymmetry parameter: {asym:.3f}")
+    print(f"FWHM: {fwhm:.6f} GHz")
+    print(f"Peak amplitude: {A:.6f}")
+    print(f"Background level: {B:.6f}")
+    print(f"Peak signal-to-noise ratio: {A/abs(B) if B != 0 else 'high'}")
+    
+    if len(half_max_x) >= 2:
+        measured_fwhm = half_max_x[1] - half_max_x[0]
+        print(f"Measured FWHM (from curve): {measured_fwhm:.6f} GHz")
+    
+    # Plot the fitted curve
+    plt.plot(fit_x, fit_y, color='mediumvioletred', label='Asymmetric Lorentzian Fit')
+    
+    # Add horizontal line at half maximum
+    plt.axhline(y=half_max, color='b', linestyle='--', 
+               label=f'Half Maximum (FWHM = {fwhm:.6f} GHz)')
+
+    
+    # Mark the FWHM points
+    if len(half_max_x) >= 2:
+        plt.plot(half_max_x, [half_max, half_max], 'bo', label='FWHM Points')
+        
+        # Add vertical lines to show FWHM
+        plt.vlines(half_max_x, ymin=B, ymax=half_max, colors='b', linestyles='dotted')
+        
+        # Add annotation showing the FWHM value
+        plt.annotate(f"FWHM = {fwhm:.6f} GHz", 
+                     xy=((half_max_x[0] + half_max_x[1])/2, half_max),
+                     xytext=(0, 20),
+                     textcoords="offset points",
+                     ha='center',
+                     arrowprops=dict(arrowstyle='->'),
+                     fontsize = 14)
+
+except Exception as e:
+    print(f"Error fitting Peak 6: {e}")
+
+#plt.title("Peak 6 Analysis with FWHM Measurement")
+plt.xlabel("Relative Frequency (GHz)", fontsize = 14)
+plt.ylabel("Intensity (a.u.)", fontsize = 14)
+plt.tick_params(axis='both', labelsize=14)
+plt.legend(fontsize = 14)
+plt.grid(True)
+plt.xlim([0.55, 0.65])  # Focus on the peak area
+plt.show()
+#%%
+'''
+# Analyze the same peak for all magnetic fields with improved fitting
+plt.figure(figsize=(12, 10))
+peak_results = {}  # Dictionary to store all results
+
+# Create a colormap for better visualization of all curves
+import matplotlib.cm as cm
+colors = cm.rainbow(np.linspace(0, 1, len(magnetic_fields)))
+
+# Use a wider window to capture the full peak for all magnetic fields
+target_freq = 0.615  # Target frequency in GHz
+base_window = 500    # Base window size
+max_freq_shift = 0.06  # Expected maximum frequency shift over all B fields
+
+for i, B in enumerate(magnetic_fields):
+    if B in mag_subset:
+        # For higher B fields, the peak can shift significantly
+        # We need to look in a wider region and be smarter about finding the peak
+        
+        # Initial estimate of peak location
+        initial_pos = np.abs(x_subset - target_freq).argmin()
+        
+        # Define a search window that grows with B field to account for potential shifts
+        search_window = base_window + int(B * 20)  # Wider window for higher B
+        search_left = max(0, initial_pos - search_window)
+        search_right = min(len(x_subset), initial_pos + search_window)
+        
+        # Search data in this window
+        search_x = x_subset[search_left:search_right]
+        search_y = mag_subset[B][search_left:search_right]
+        
+        # Use Savitzky-Golay filter to smooth the data for better peak finding
+        smoothed = savgol_filter(search_y, min(51, len(search_y)-3 if len(search_y) > 3 else 3), 3)
+        
+        # Find the peak in the smoothed data
+        # First try to find peaks with enough prominence
+        local_peaks, _ = find_peaks(smoothed, prominence=0.01)
+        
+        # If no peaks found, just use the maximum value
+        if len(local_peaks) == 0:
+            local_max_idx = np.argmax(smoothed)
+        else:
+            # Find the peak closest to expected location
+            expected_freq = target_freq + (B * 0.001)  # Simple model of shift with B
+            expected_idx = np.abs(search_x - expected_freq).argmin()
+            
+            # Choose the peak closest to expected position
+            distances = np.abs(local_peaks - (expected_idx - search_left))
+            closest_peak_idx = local_peaks[np.argmin(distances)]
+            local_max_idx = closest_peak_idx
+        
+        # Now define a fitting window around the identified peak
+        peak_position = search_left + local_max_idx
+        fit_window = int(base_window / 2)  # Smaller window focused on the peak
+        left = max(0, peak_position - fit_window)
+        right = min(len(x_subset), peak_position + fit_window)
+        
+        # Extract data for fitting
+        x_data = x_subset[left:right]
+        y_data = mag_subset[B][left:right]
+        
+        # Plot the data with the assigned color
+        plt.plot(x_data, y_data, '-', color=colors[i], label=f'B = {B}')
+        
+        try:
+            # Initial guesses - crucial for good fits
+            x0_guess = x_subset[peak_position]
+            gamma_guess = 0.01
+            A_guess = mag_subset[B][peak_position] - np.min(y_data)
+            B_guess = np.min(y_data)
+            asym_guess = 0.1  # Allow for asymmetry
+            
+            p0 = [x0_guess, gamma_guess, A_guess, B_guess, asym_guess]
+            
+            # Set bounds to constrain the fit parameters
+            # This helps prevent wildly unrealistic fits
+            bounds = (
+                [x0_guess - 0.02, 0.001, 0, -np.inf, -0.9],  # Lower bounds
+                [x0_guess + 0.02, 0.03, np.inf, np.inf, 0.9]   # Upper bounds
+            )
+            
+            # Fit asymmetric Lorentzian
+            popt, pcov = curve_fit(asymmetric_lorentzian, x_data, y_data, 
+                                   p0=p0, bounds=bounds, maxfev=20000)
+            x0, gamma, A, B_val, asym = popt
+            
+            # Calculate FWHM accounting for asymmetry
+            fwhm = calculate_fwhm(gamma, asym)
+            
+            # Store results
+            peak_results[B] = {
+                "center": x0,
+                "fwhm": fwhm,
+                "gamma": gamma,
+                "amplitude": A,
+                "background": B_val,
+                "asymmetry": asym,
+                "snr": A/abs(B_val) if B_val != 0 else float('inf')
+            }
+            
+            print(f"\nB = {B} T:")
+            print(f"  Center: {x0:.6f} GHz")
+            print(f"  FWHM: {fwhm:.6f} GHz")
+            print(f"  Asymmetry: {asym:.3f}")
+            print(f"  SNR: {peak_results[B]['snr']:.2f}")
+            
+            # Plot the fitted curve with dashed line of the same color
+            fit_x = np.linspace(min(x_data), max(x_data), 500)
+            fit_y = asymmetric_lorentzian(fit_x, *popt)
+            plt.plot(fit_x, fit_y, '--', color=colors[i], alpha=0.7)
+            
+        except Exception as e:
+            print(f"Error fitting peak for B = {B}: {e}")
+        
+
+plt.title("Peak 6 Across Different Magnetic Fields")
+plt.xlabel("Relative Frequency (GHz)")
+plt.ylabel("Intensity (a.u.)")
+plt.legend(loc='upper right', ncol=2)  # Two columns to handle many field values
+plt.grid(True, alpha=0.3)
+plt.xlim([0.54, 0.7])  # Wider range to ensure all peaks are fully visible
+plt.show()
+
+
+# If we successfully analyzed magnetic fields, plot the Zeeman effect
+if peak_results:
+    # Sort magnetic fields for plotting
+    sorted_fields = sorted(peak_results.keys())
+    centers = [peak_results[B]["center"] for B in sorted_fields]
+    fwhms = [peak_results[B]["fwhm"] for B in sorted_fields]
+    
+    # Linear fit to the peak centers vs magnetic field (Zeeman effect)
+    def linear(x, m, b):
+        return m*x + b
+    
+    try:
+        # Fit a line to the peak positions
+        zeeman_popt, _ = curve_fit(linear, sorted_fields, centers)
+        zeeman_slope, zeeman_intercept = zeeman_popt
+        fit_line = [linear(B, zeeman_slope, zeeman_intercept) for B in sorted_fields]
+        
+        # Calculate Zeeman splitting rate
+        zeeman_rate = zeeman_slope * 1000  # Convert to MHz/unit of B field
+        
+        # Create plot with fit line
+        plt.figure(figsize=(10, 6))
+        plt.plot(sorted_fields, centers, 'bo', label='Peak Center')
+        plt.plot(sorted_fields, fit_line, 'r-', 
+                 label=f'Linear Fit: {zeeman_slope:.6f} GHz/unit\n({zeeman_rate:.2f} MHz/unit)')
+        plt.title("Zeeman Effect: Peak 6 Center vs. Magnetic Field")
+        plt.xlabel("Magnetic Field (arb. units)")
+        plt.ylabel("Peak Center (GHz)")
+        plt.grid(True)
+        plt.legend()
+        plt.show()
+    except Exception as e:
+        print(f"Error fitting Zeeman effect: {e}")
+        
+        # Just plot the points without fit
+        plt.figure(figsize=(10, 6))
+        plt.plot(sorted_fields, centers, 'bo-', label='Peak Center')
+        plt.title("Zeeman Effect: Peak 6 Center vs. Magnetic Field")
+        plt.xlabel("Magnetic Field (arb. units)")
+        plt.ylabel("Peak Center (GHz)")
+        plt.grid(True)
+        plt.legend()
+        plt.show()
+    
+    # FWHM vs Magnetic Field plot
+    plt.figure(figsize=(10, 6))
+    plt.plot(sorted_fields, fwhms, 'ro-', label='FWHM')
+    plt.title("Peak 6 FWHM vs. Magnetic Field")
+    plt.xlabel("Magnetic Field (arb. units)")
+    plt.ylabel("FWHM (GHz)")
+    plt.grid(True)
+    plt.legend()
+    plt.show()
+    
+    # Create a detailed table of results
+    plt.figure(figsize=(14, len(sorted_fields) * 0.4 + 1))
+    plt.axis('off')
+    table_data = [["Magnetic Field", "Center (GHz)", "FWHM (GHz)", "Gamma", "Asymmetry", "SNR"]]
+    for B in sorted_fields:
+        table_data.append([
+            f"{B}", 
+            f"{peak_results[B]['center']:.6f}", 
+            f"{peak_results[B]['fwhm']:.6f}",
+            f"{peak_results[B]['gamma']:.6f}",
+            f"{peak_results[B]['asymmetry']:.3f}",
+            f"{peak_results[B]['snr']:.2f}"
+        ])
+    
+    plt.table(cellText=table_data, loc='center', cellLoc='center', edges='open')
+    plt.title("Peak 6 Analysis Results")
+    plt.tight_layout()
+    plt.show()
+    
+'''
+
+#%%
+# Analyze the same peak for all magnetic fields with improved fitting
+plt.figure(figsize=(12, 10))
+peak_results = {}  # Dictionary to store all results
+
+# Create a colormap for better visualization of all curves
+import matplotlib.cm as cm
+colors = cm.rainbow(np.linspace(0, 1, len(magnetic_fields)))
+
+# Use a much wider window to capture the full peak for all magnetic fields
+target_freq = 0.615  # Target frequency in GHz
+base_window = 800    # Increased from 500 to 800
+max_freq_shift = 0.10  # Increased from 0.06 to 0.10 GHz
+
+for i, B in enumerate(magnetic_fields):
+    if B in mag_subset:
+        # For higher B fields, the peak can shift significantly
+        # We need to look in a wider region and be smarter about finding the peak
+        
+        # Initial estimate of peak location
+        initial_pos = np.abs(x_subset - target_freq).argmin()
+        
+        # Define a search window that grows with B field to account for potential shifts
+        search_window = base_window + int(B * 40)  # Wider window for higher B (increased from 20 to 40)
+        search_left = max(0, initial_pos - search_window)
+        search_right = min(len(x_subset), initial_pos + search_window)
+        
+        # Search data in this window
+        search_x = x_subset[search_left:search_right]
+        search_y = mag_subset[B][search_left:search_right]
+        
+        # Use Savitzky-Golay filter to smooth the data for better peak finding
+        smoothed = savgol_filter(search_y, min(51, len(search_y)-3 if len(search_y) > 3 else 3), 3)
+        
+        # Find the peak in the smoothed data
+        # First try to find peaks with enough prominence
+        local_peaks, _ = find_peaks(smoothed, prominence=0.01)
+        
+        # If no peaks found, just use the maximum value
+        if len(local_peaks) == 0:
+            local_max_idx = np.argmax(smoothed)
+        else:
+            # Find the peak closest to expected location
+            # Adjusted the coefficient from 0.001 to 0.0015 to account for larger shifts at higher B
+            expected_freq = target_freq + (B * 0.0015)  
+            expected_idx = np.abs(search_x - expected_freq).argmin()
+            
+            # Choose the peak closest to expected position
+            distances = np.abs(local_peaks - (expected_idx - search_left))
+            closest_peak_idx = local_peaks[np.argmin(distances)]
+            local_max_idx = closest_peak_idx
+        
+        # Now define a fitting window around the identified peak
+        peak_position = search_left + local_max_idx
+        # Increase fitting window as well, especially important for higher B fields
+        fit_window = int(base_window / 1.5)  # Larger window focused on the peak (less reduction from base window)
+        left = max(0, peak_position - fit_window)
+        right = min(len(x_subset), peak_position + fit_window)
+        
+        # Extract data for fitting
+        x_data = x_subset[left:right]
+        y_data = mag_subset[B][left:right]
+        
+        # Plot the data with the assigned color
+        plt.plot(x_data, y_data, '-', color=colors[i], label=f'B = {B}')
+        
+        
+        try:
+            # Initial guesses - crucial for good fits
+            x0_guess = x_subset[peak_position]
+            gamma_guess = 0.01
+            A_guess = mag_subset[B][peak_position] - np.min(y_data)
+            B_guess = np.min(y_data)
+            asym_guess = 0.1  # Allow for asymmetry
+            
+            p0 = [x0_guess, gamma_guess, A_guess, B_guess, asym_guess]
+            
+            # Set bounds to constrain the fit parameters
+            # Widened bounds to accommodate larger peak shifts
+            bounds = (
+                [x0_guess - 0.04, 0.001, 0, -np.inf, -0.9],  # Increased from 0.02 to 0.04
+                [x0_guess + 0.04, 0.04, np.inf, np.inf, 0.9]   # Increased from 0.02/0.03 to 0.04
+            )
+            
+            # Fit asymmetric Lorentzian with increased max iterations
+            popt, pcov = curve_fit(asymmetric_lorentzian, x_data, y_data, 
+                                   p0=p0, bounds=bounds, maxfev=30000)  # Increased from 20000 to 30000
+            x0, gamma, A, B_val, asym = popt
+            
+            # Calculate FWHM accounting for asymmetry
+            fwhm = calculate_fwhm(gamma, asym)
+            
+            # Store results
+            peak_results[B] = {
+                "center": x0,
+                "fwhm": fwhm,
+                "gamma": gamma,
+                "amplitude": A,
+                "background": B_val,
+                "asymmetry": asym,
+                "snr": A/abs(B_val) if B_val != 0 else float('inf')
+            }
+            
+            print(f"\nB = {B} T:")
+            print(f"  Center: {x0:.6f} GHz")
+            print(f"  FWHM: {fwhm:.6f} GHz")
+            print(f"  Asymmetry: {asym:.3f}")
+            print(f"  SNR: {peak_results[B]['snr']:.2f}")
+            
+            # Plot the fitted curve with dashed line of the same color
+            fit_x = np.linspace(min(x_data), max(x_data), 500)
+            fit_y = asymmetric_lorentzian(fit_x, *popt)
+            plt.plot(fit_x, fit_y, '--', color=colors[i], alpha=0.7)
+            
+        except Exception as e:
+            print(f"Error fitting peak for B = {B}: {e}")
+
+plt.title("Peak 6 Across Different Magnetic Fields")
+plt.xlabel("Relative Frequency (GHz)")
+plt.ylabel("Intensity (a.u.)")
+plt.legend(loc='upper right', ncol=2)  # Two columns to handle many field values
+plt.grid(True, alpha=0.3)
+plt.xlim([0.54, 0.70])  # Wider range to ensure all peaks are fully visible
+plt.show()
+
+#%%
+
+# If we successfully analyzed magnetic fields, plot the Zeeman effect
+if peak_results:
+    # Sort magnetic fields for plotting
+    sorted_fields = sorted(peak_results.keys())
+    centers = [peak_results[B]["center"] for B in sorted_fields]
+    fwhms = [peak_results[B]["fwhm"] for B in sorted_fields]
+    
+    # Linear fit to the peak centers vs magnetic field (Zeeman effect)
+    def linear(x, m, b):
+        return m*x + b
+    
+    try:
+        # Fit a line to the peak positions
+        zeeman_popt, _ = curve_fit(linear, sorted_fields, centers)
+        zeeman_slope, zeeman_intercept = zeeman_popt
+        fit_line = [linear(B, zeeman_slope, zeeman_intercept) for B in sorted_fields]
+        
+        # Calculate Zeeman splitting rate
+        zeeman_rate = zeeman_slope * 1000  # Convert to MHz/unit of B field
+        
+        # Create plot with fit line
+        plt.figure(figsize=(10, 6))
+        plt.plot(sorted_fields, centers, 'bo', label='Peak Center')
+        plt.plot(sorted_fields, fit_line, 'r-', 
+                 label=f'Linear Fit: {zeeman_slope:.6f} GHz/unit\n({zeeman_rate:.2f} MHz/unit)')
+        plt.title("Zeeman Effect: Peak 6 Center vs. Magnetic Field")
+        plt.xlabel("Magnetic Field (arb. units)")
+        plt.ylabel("Peak Center (GHz)")
+        plt.grid(True)
+        plt.legend()
+        plt.show()
+    except Exception as e:
+        print(f"Error fitting Zeeman effect: {e}")
+        
+        # Just plot the points without fit
+        plt.figure(figsize=(10, 6))
+        plt.plot(sorted_fields, centers, 'bo-', label='Peak Center')
+        plt.title("Zeeman Effect: Peak 6 Center vs. Magnetic Field")
+        plt.xlabel("Magnetic Field (arb. units)")
+        plt.ylabel("Peak Center (GHz)")
+        plt.grid(True)
+        plt.legend()
+        plt.show()
+    
+    # FWHM vs Magnetic Field plot
+    plt.figure(figsize=(10, 6))
+    plt.plot(sorted_fields, fwhms, 'ro-', label='FWHM')
+    plt.title("Peak 6 FWHM vs. Magnetic Field")
+    plt.xlabel("Magnetic Field (arb. units)")
+    plt.ylabel("FWHM (GHz)")
+    plt.grid(True)
+    plt.legend()
+    plt.show()
+    
+#%%    
+    
+    # Create a detailed table of results
+    plt.figure(figsize=(14, len(sorted_fields) * 0.4 + 1))
+    plt.axis('off')
+    table_data = [["Magnetic Field", "Center (GHz)", "FWHM (GHz)", "Gamma", "Asymmetry", "SNR"]]
+    for B in sorted_fields:
+        table_data.append([
+            f"{B}", 
+            f"{peak_results[B]['center']:.6f}", 
+            f"{peak_results[B]['fwhm']:.6f}",
+            f"{peak_results[B]['gamma']:.6f}",
+            f"{peak_results[B]['asymmetry']:.3f}",
+            f"{peak_results[B]['snr']:.2f}"
+        ])
+    
+    plt.table(cellText=table_data, loc='center', cellLoc='center', edges='open')
+    plt.title("Peak 6 Analysis Results")
+    plt.tight_layout()
+    plt.show()
