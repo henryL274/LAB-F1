@@ -1,0 +1,280 @@
+For each power level:
+    1. Find the peak within the specified window
+    2. Generate its Lorentzian curve
+    3. Normalize the area under the curve to 1
+    4. Center the curve at the origin
+    5. Plot all centered, area-normalized Lorentzians with a colormap based on power
+    
+    Parameters:
+    data: DataFrame with 'X' column and data columns (named with power values)
+    peak_windows: Dictionary with power values as keys and window info as values
+    smooth_window: Window size for Savitzky-Golay smoothing
+    smooth_poly: Polynomial order for smoothing
+    """
+    import numpy as np
+    import pandas as pd
+    from scipy.signal import find_peaks, savgol_filter
+    import matplotlib.pyplot as plt
+    import matplotlib.cm as cm
+    from scipy import integrate
+    
+    # Function to generate Lorentzian curve
+    def lorentzian(x, x0, gamma, amp):
+        """Generate a Lorentzian curve with zero baseline."""
+        return amp * (gamma**2 / ((x - x0)**2 + gamma**2))
+    
+    # Calculate parameters for Lorentzian from direct FWHM analysis
+    def calculate_fwhm_from_data(x_data, y_data, peak_idx, smoothing=True, 
+                               smooth_window=100, smooth_poly=3, interpolate=True):
+        """
+        Calculate FWHM directly from the data for a single peak.
+        Using fixed baseline of 0.0.
+        """
+        # Apply smoothing if requested
+        if smoothing:
+            y_smooth = savgol_filter(y_data, smooth_window, smooth_poly)
+        else:
+            y_smooth = y_data.copy()
+        
+        peak_x = x_data[peak_idx]
+        peak_y = y_smooth[peak_idx]
+        
+        # Fixed baseline of 0.0
+        baseline = 0.0
+        
+        # Calculate amplitude (peak height above baseline)
+        amplitude = peak_y - baseline
+        
+        # Find half max value (relative to baseline)
+        half_max = baseline + amplitude / 2
+        
+        # Find left and right half-max positions
+        left_idx = right_idx = peak_idx
+        
+        # Search left from peak for half max crossing
+        for i in range(peak_idx, 0, -1):
+            if y_smooth[i] <= half_max:
+                left_idx = i
+                break
+        
+        # Search right from peak for half max crossing
+        for i in range(peak_idx, len(y_smooth)-1):
+            if y_smooth[i] <= half_max:
+                right_idx = i
+                break
+        
+        # Get x positions at half max
+        left_x = x_data[left_idx]
+        right_x = x_data[right_idx]
+        
+        # Interpolate to improve accuracy if requested
+        if interpolate and left_idx > 0 and right_idx < len(y_smooth)-1:
+            # Left half-max interpolation
+            if left_idx < peak_idx and y_smooth[left_idx] != y_smooth[left_idx+1]:
+                t = (half_max - y_smooth[left_idx]) / (y_smooth[left_idx+1] - y_smooth[left_idx])
+                left_x = x_data[left_idx] + t * (x_data[left_idx+1] - x_data[left_idx])
+            
+            # Right half-max interpolation
+            if right_idx > peak_idx and y_smooth[right_idx] != y_smooth[right_idx-1]:
+                t = (half_max - y_smooth[right_idx]) / (y_smooth[right_idx-1] - y_smooth[right_idx])
+                right_x = x_data[right_idx] - t * (x_data[right_idx] - x_data[right_idx-1])
+        
+        # Calculate FWHM
+        fwhm = right_x - left_x
+        
+        # For Lorentzian, gamma = FWHM/2
+        gamma = fwhm / 2
+        
+        return {
+            'peak_position': peak_x,
+            'peak_height': peak_y,
+            'left_half_max_pos': left_x,
+            'right_half_max_pos': right_x,
+            'fwhm': fwhm,
+            'gamma': gamma,
+            'amplitude': amplitude
+        }
+    
+    # Store peak data for each power level
+    all_peaks = []
+    power_values = []
+    
+    # Process each power level using the specified windows
+    for power, window_info in peak_windows.items():
+        column = window_info['column']
+        power_str = window_info['power_str']
+        x_min = window_info['x_min']
+        x_max = window_info['x_max']
+        
+        # Ensure column exists in dataframe
+        if column not in data.columns:
+            print(f"Column {column} not found in dataframe")
+            continue
+        
+        # Filter data to the specified window
+        window_data = data[(data['X'] >= x_min) & (data['X'] <= x_max)].copy()
+        
+        if window_data.empty:
+            print(f"No data points found in window for power {power}")
+            continue
+        
+        x_data = window_data['X'].values
+        y_data = window_data[column].values
+        
+        # Smooth the data
+        smooth_window_adjusted = min(smooth_window, len(y_data) - 1 if len(y_data) % 2 == 0 else len(y_data))
+        smooth_poly_adjusted = min(smooth_poly, smooth_window_adjusted - 1)
+        y_smooth = savgol_filter(y_data, smooth_window_adjusted, smooth_poly_adjusted)
+        
+        # Find the highest peak in the window
+        peak_idx = np.argmax(y_smooth)
+        
+        # Calculate FWHM and other parameters
+        peak_params = calculate_fwhm_from_data(
+            x_data, y_data, peak_idx, 
+            smoothing=True, 
+            smooth_window=smooth_window_adjusted,
+            smooth_poly=smooth_poly_adjusted,
+            interpolate=True
+        )
+        
+        # Store the power value and peak information
+        power_values.append(power)
+        all_peaks.append({
+            'power': power,
+            'power_str': power_str,
+            'peak_position': peak_params['peak_position'],
+            'gamma': peak_params['gamma'],
+            'amplitude': peak_params['amplitude'],
+            'fwhm': peak_params['fwhm']
+        })
+        
+        print(f"Power {power} μW: Peak at {peak_params['peak_position']:.6f}, "
+              f"FWHM = {peak_params['fwhm']:.6f}, Amplitude = {peak_params['amplitude']:.4f}")
+    
+    # Sort by power for colormap
+    all_peaks.sort(key=lambda x: x['power'])
+    power_values = [p['power'] for p in all_peaks]
+    
+    # Generate normalized Lorentzian curves for all power levels
+    plt.figure(figsize=(12, 10))
+    
+    # Create a colormap based on power values
+    min_power = min(power_values)
+    max_power = max(power_values)
+    norm = plt.Normalize(min_power, max_power)
+    color_map = cm.viridis
+    
+    # Create a common x-axis centered at 0 for all Lorentzians
+    # Make the range wide enough to capture the widest peak
+    max_fwhm = max(peak['fwhm'] for peak in all_peaks)
+    x_range = max(0.0002, max_fwhm * 4)  # At least 4 times the max FWHM
+    x_centered = np.linspace(-x_range/2, x_range/2, 1000)
+    
+    # Create legend handles
+    handles = []
+    
+    # Plot each normalized Lorentzian
+    for i, peak_data in enumerate(all_peaks):
+        # Extract peak parameters
+        power = peak_data['power']
+        gamma = peak_data['gamma']
+        amplitude = peak_data['amplitude']
+        
+        # Get color from colormap
+        color = color_map(norm(power))
+        
+        # Generate Lorentzian curve centered at 0 (shifted)
+        y_lorentzian = lorentzian(x_centered, 0, gamma, amplitude)
+        
+        # Calculate area under the curve
+        area = integrate.simps(y_lorentzian, x_centered)
+        
+        # Area-normalize the curve (so area = 1)
+        y_lorentzian_normalized = y_lorentzian / area
+        
+        # Plot the curve
+        line, = plt.plot(x_centered, y_lorentzian_normalized, '-', color=color, linewidth=2)
+        
+        # Add to legend handles only for selected powers (to avoid overcrowding)
+        if i == 0 or i == len(all_peaks)-1 or i % 3 == 0:
+            handles.append((line, f"{power} μW"))
+    
+    # Create custom legend
+    legend_lines, legend_labels = zip(*handles)
+    plt.legend(legend_lines, legend_labels, title="Power (μW)", loc="upper right")
+    
+    # Add colorbar
+    sm = plt.cm.ScalarMappable(cmap=color_map, norm=norm)
+    sm.set_array([])
+    cbar = plt.colorbar(sm)
+    cbar.set_label('Power (μW)')
+    
+    # Set plot labels and title
+    plt.grid(True, alpha=0.3)
+    plt.xlabel('Frequency Offset (centered at peak position)')
+    plt.ylabel('Area-Normalized Intensity')
+    plt.title('Area-Normalized Peak Lorentzians - Power Broadening Visualization')
+    
+    # Add text describing the effect
+    plt.figtext(0.5, 0.01, 
+               "Power broadening effect: As power increases, peaks become wider and shorter (area conserved)", 
+               ha="center", fontsize=10, bbox={"facecolor":"white", "alpha":0.5, "pad":5})
+    
+    plt.tight_layout(rect=[0, 0.03, 1, 0.97])  # Adjust layout to make room for the text
+    plt.show()
+    
+    # Create additional plot showing the trend of FWHM and peak height with power
+    plt.figure(figsize=(12, 8))
+    
+    # Extract data for plotting
+    powers = [p['power'] for p in all_peaks]
+    fwhms = [p['fwhm'] for p in all_peaks]
+    amplitudes = [p['amplitude'] for p in all_peaks]
+    
+    # Calculate peak heights after area normalization
+    # For a Lorentzian with area=1, height = 2/(pi*gamma)
+    normalized_heights = [(2/(np.pi*p['gamma'])) for p in all_peaks]
+    
+    # Plot FWHM vs Power
+    ax1 = plt.subplot(111)
+    ax1.scatter(powers, fwhms, color='blue', s=80, label='FWHM')
+    ax1.plot(powers, fwhms, 'b-', alpha=0.7)
+    ax1.set_xlabel('Power (μW)')
+    ax1.set_ylabel('FWHM', color='blue')
+    ax1.tick_params(axis='y', labelcolor='blue')
+    ax1.grid(True, alpha=0.3)
+    
+    # Create a second y-axis for normalized peak height
+    ax2 = ax1.twinx()
+    ax2.scatter(powers, normalized_heights, color='red', s=80, label='Normalized Peak Height')
+    ax2.plot(powers, normalized_heights, 'r-', alpha=0.7)
+    ax2.set_ylabel('Area-Normalized Peak Height', color='red')
+    ax2.tick_params(axis='y', labelcolor='red')
+    
+    # Add combined legend
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc='center right')
+    
+    plt.title('Power Broadening Effect on Peak Shape (Area-Normalized)')
+    plt.tight_layout()
+    plt.show()
+    
+    # Create a third plot showing the raw amplitude vs power (without normalization)
+    plt.figure(figsize=(10, 6))
+    plt.scatter(powers, amplitudes, color='green', s=80)
+    plt.plot(powers, amplitudes, 'g-', alpha=0.7)
+    plt.xlabel('Power (μW)')
+    plt.ylabel('Raw Peak Amplitude')
+    plt.title('Raw Peak Amplitude vs Power')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+    
+    return {
+        'peaks': all_peaks
+    }
+
+# Example usage:
+# results = visualize_area_normalized_peaks(data, peak_windows)
