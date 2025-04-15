@@ -1,0 +1,1916 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.signal import find_peaks, peak_widths, savgol_filter
+from scipy.interpolate import interp1d
+from scipy.optimize import curve_fit, fsolve
+import os
+import glob
+
+"""
+IMPORTING DATA
+"""
+
+
+def import_fine_peaks_data(filepath=None):
+    """
+    Import fine peaks data from a CSV file.
+    If filepath is None, look for the most recent fine_peaks*.csv file in the current directory.
+    
+    Returns:
+        DataFrame containing the fine peaks data
+    """
+    if filepath is None:
+        # Find the most recent file matching the pattern
+        files = glob.glob('fine_peaks*.csv')
+        if not files:
+            raise FileNotFoundError("No fine_peaks*.csv files found in the current directory")
+        
+        # Sort by modification time (newest first)
+        files.sort(key=os.path.getmtime, reverse=True)
+        filepath = files[0]
+        print(f"Using most recent file: {filepath}")
+    
+    # Import the data
+    try:
+        data = pd.read_csv(filepath)
+        print(f"Successfully imported data with columns: {data.columns.tolist()}")
+        return data
+    except Exception as e:
+        print(f"Error importing data: {str(e)}")
+        raise
+#%%
+
+"""
+ALIGNING DATA
+"""
+
+
+def align_peaks_to_common_x_axis(data, x_min=0.07, x_max=0.074, 
+                                target_peak1=None, target_peak2=None,
+                                smooth_window=100, smooth_poly=3, power_threshold=1.0):
+    """
+    Rescale and shift the data so that all peaks are aligned to the same location.
+    Returns a single dataframe with a common x-axis and aligned intensities.
+    
+    Parameters:
+    data: DataFrame with 'X' column and data columns
+    x_min, x_max: Range to search for peaks
+    target_peak1, target_peak2: Target positions for the two largest peaks
+    smooth_window: Window size for Savitzky-Golay smoothing
+    smooth_poly: Polynomial order for smoothing
+    power_threshold: Minimum power level required to include a dataset
+    
+    Returns:
+    DataFrame with common x-axis and aligned intensities for all columns
+    """
+    import numpy as np
+    import pandas as pd
+    from scipy.signal import find_peaks, savgol_filter
+    
+    # Make a copy of the data to avoid modifying the original
+    original_data = data.copy()
+    
+    # Get x values and filter to the specified range
+    x_values = data['X'].values
+    range_mask = (x_values >= x_min) & (x_values <= x_max)
+    x_range = x_values[range_mask]
+    
+    # First pass: find the peaks in each column and determine rescaling parameters
+    column_info = {}
+    valid_columns = []
+    
+    # Process each data column individually
+    data_columns = [col for col in data.columns if col != 'X']
+    for col in data_columns:
+        # Calculate power level (using column name as float)
+        try:
+            power_level = float(col)
+        except ValueError:
+            # If column name is not a number, just include it
+            power_level = float('inf')  
+        
+        # Skip columns with power level below threshold
+        if power_level < power_threshold:
+            print(f"Skipping column {col} - power level {power_level:.2f} below threshold {power_threshold}")
+            continue
+        
+        # Get y values for this column
+        y_values = data[col].values
+        y_range = y_values[range_mask]
+        
+        # Smooth the data for better peak detection
+        y_smooth = savgol_filter(y_range, smooth_window, smooth_poly)
+        
+        # Normalize for peak finding
+        y_min = np.min(y_smooth)
+        y_max = np.max(y_smooth)
+        if y_max == y_min:  # Avoid division by zero
+            print(f"Skipping column {col} - flat signal (no peaks)")
+            continue
+            
+        y_norm = (y_smooth - y_min) / (y_max - y_min)
+        
+        # Find all peaks
+        try:
+            peaks, properties = find_peaks(y_norm, height=0.2, prominence=0.2, distance=10)
+            
+            if len(peaks) < 2:
+                print(f"Skipping column {col} - found only {len(peaks)} peaks, need at least 2 for rescaling")
+                continue
+                
+            # Sort peaks by prominence
+            sorted_indices = np.argsort(properties['prominences'])[::-1]
+            sorted_peaks = peaks[sorted_indices]
+            
+            # Get the two largest peaks
+            peak1_idx = sorted_peaks[0]
+            peak2_idx = sorted_peaks[1]
+            
+            # Ensure peak1 is the left peak and peak2 is the right peak
+            if x_range[peak1_idx] > x_range[peak2_idx]:
+                peak1_idx, peak2_idx = peak2_idx, peak1_idx
+            
+            # Get current peak positions
+            current_peak1 = x_range[peak1_idx]
+            current_peak2 = x_range[peak2_idx]
+            
+            # Store the column and peak info
+            column_info[col] = {
+                'current_peak1': current_peak1,
+                'current_peak2': current_peak2,
+                'power': power_level
+            }
+            valid_columns.append(col)
+            
+        except Exception as e:
+            print(f"Error processing column {col}: {str(e)}")
+            continue
+    
+    # If no target peaks are provided, use the average of detected peaks
+    if target_peak1 is None or target_peak2 is None:
+        all_peak1 = [info['current_peak1'] for info in column_info.values()]
+        all_peak2 = [info['current_peak2'] for info in column_info.values()]
+        
+        if target_peak1 is None:
+            target_peak1 = np.mean(all_peak1)
+            print(f"Using average of first peaks as target: {target_peak1:.6f}")
+        
+        if target_peak2 is None:
+            target_peak2 = np.mean(all_peak2)
+            print(f"Using average of second peaks as target: {target_peak2:.6f}")
+    
+    # Create a common x-axis spanning all the data after transformation
+    # Start by finding the needed range
+    min_x = float('inf')
+    max_x = float('-inf')
+    
+    for col, info in column_info.items():
+        # Calculate transformation parameters
+        current_peak1 = info['current_peak1']
+        current_peak2 = info['current_peak2']
+        
+        # Linear transformation: x_new = a * x_old + b
+        a = (target_peak2 - target_peak1) / (current_peak2 - current_peak1)
+        b = target_peak1 - a * current_peak1
+        
+        # Calculate the range of transformed x values
+        transformed_min = a * np.min(x_values) + b
+        transformed_max = a * np.max(x_values) + b
+        
+        min_x = min(min_x, transformed_min)
+        max_x = max(max_x, transformed_max)
+        
+        # Store transformation parameters
+        column_info[col]['scale_factor'] = a
+        column_info[col]['offset'] = b
+    
+    # Create a common x-axis with a reasonable number of points
+    num_points = len(x_values)
+    common_x = np.linspace(min_x, max_x, num_points)
+    
+    # Create the output dataframe with the common x-axis
+    aligned_data = pd.DataFrame()
+    aligned_data['X'] = common_x
+    
+    # For each column, transform its data to the common x-axis
+    for col in valid_columns:
+        info = column_info[col]
+        a = info['scale_factor']
+        b = info['offset']
+        
+        # Calculate the original x values that would map to our common x-axis
+        original_x_for_common = (common_x - b) / a
+        
+        # Interpolate the original data to get y values for our common x-axis
+        # Use np.interp which handles out-of-bounds values well
+        original_y = data[col].values
+        aligned_y = np.interp(original_x_for_common, x_values, original_y, 
+                              left=np.nan, right=np.nan)
+        
+        # Add to the output dataframe
+        aligned_data[col] = aligned_y
+        
+    # Store the transformation info in the dataframe attributes
+    aligned_data.attrs['column_info'] = column_info
+    aligned_data.attrs['target_peak1'] = target_peak1
+    aligned_data.attrs['target_peak2'] = target_peak2
+    
+    print(f"\nAlignment complete: {len(valid_columns)} columns aligned to common x-axis")
+    print(f"Target peak positions: {target_peak1:.6f}, {target_peak2:.6f}")
+    
+    return aligned_data
+
+def plot_aligned_data(aligned_data, x_min=None, x_max=None, columns=None, plot_title="Aligned Peak Data"):
+    """
+    Plot the aligned data with peak markers.
+    
+    Parameters:
+    aligned_data: DataFrame with common x-axis and aligned intensities
+    x_min, x_max: Range to plot
+    columns: List of columns to plot (if None, plot all)
+    plot_title: Title for the plot
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from scipy.signal import savgol_filter
+    
+    # Get target peak positions
+    target_peak1 = aligned_data.attrs.get('target_peak1')
+    target_peak2 = aligned_data.attrs.get('target_peak2')
+    
+    # Get x values
+    x_values = aligned_data['X'].values
+    
+    # Determine which columns to plot
+    if columns is None:
+        columns = [col for col in aligned_data.columns if col != 'X']
+    
+    # Create the plot
+    plt.figure(figsize=(12, 8))
+    
+    # Plot each column
+    for col in columns:
+        if col in aligned_data.columns:
+            y_values = aligned_data[col].values
+            
+            # Apply smoothing for better visualization
+            smooth_window = min(101, len(x_values) // 10 * 2 + 1)
+            smooth_poly = 3
+            
+            # Handle NaN values for smoothing
+            valid_mask = ~np.isnan(y_values)
+            if np.sum(valid_mask) > smooth_window:
+                y_smooth = np.full_like(y_values, np.nan)
+                y_smooth[valid_mask] = savgol_filter(y_values[valid_mask], smooth_window, smooth_poly)
+                
+                # Plot with a label (using power level from column name if possible)
+                try:
+                    power = float(col)
+                    label = f"Power: {power:.1f}"
+                except ValueError:
+                    label = col
+                    
+                plt.plot(x_values, y_smooth, '-', linewidth=1.5, label=label, alpha=0.8)
+    
+    # Mark the target peak positions
+    if target_peak1 is not None:
+        plt.axvline(x=target_peak1, color='r', linestyle='--', alpha=0.7, 
+                   label=f'Target Peak 1: {target_peak1:.6f}')
+    
+    if target_peak2 is not None:
+        plt.axvline(x=target_peak2, color='g', linestyle='--', alpha=0.7, 
+                   label=f'Target Peak 2: {target_peak2:.6f}')
+    
+    # Set x limits if provided
+    if x_min is not None and x_max is not None:
+        plt.xlim(x_min, x_max)
+    
+    plt.grid(True, alpha=0.3)
+    plt.xlabel('X (Common Axis)')
+    plt.ylabel('Intensity')
+    plt.title(plot_title)
+    plt.legend(loc='best', fontsize='small')
+    plt.tight_layout()
+    plt.show()
+
+# Example usage:
+data = import_fine_peaks_data('C:/Users/henry/Documents/LAB D2/fine_peaks_hybrid_all_datasets_x_0.068_0.082.csv')
+# 
+gap = 384.230484468562*1e12
+ground2 = -2.5630055979*1e9
+split3 = +193.740846*1e6
+split2 = -72.911332*1e6
+split1 = -229.851856*1e6
+
+Fg2_F3 = gap + ground2 + split3  
+Fg2_F2 = gap + ground2 + split2
+Fg2_F1 = gap + ground2 + split1
+
+Fg2_F13 = (Fg2_F1+Fg2_F3)/2   
+Fg2_F23 = (Fg2_F2+Fg2_F3)/2  
+
+# # Align all peaks to the common x-axis
+aligned_data = align_peaks_to_common_x_axis(
+     data, 
+     x_min=0.07, 
+     x_max=0.074, 
+     target_peak1=Fg2_F13,
+     target_peak2=Fg2_F23,
+     power_threshold=6.0)
+
+# Plot the aligned data
+plot_aligned_data(
+     aligned_data,
+     x_min=Fg2_F1 - 0.1*1e9,
+     x_max=Fg2_F3 + 0.1*1e9)
+
+#%%
+"""
+FINDING PEAKS IN DATA ACROSS WHOLE REGION
+"""
+
+def find_peaks_in_spectral_data(aligned_data, height_threshold=None, prominence=None, 
+                               distance=10, power_threshold=6.0, outliers=None, 
+                               smooth=True, smooth_window=21, smooth_poly=3, 
+                               plot_results=True):
+    """
+    Find peaks in spectral data across the full range of aligned data.
+    
+    Parameters:
+    -----------
+    aligned_data : pandas DataFrame
+        The aligned data with a common x-axis
+    height_threshold : float
+        Minimum absolute height of peaks to be detected
+    prominence : float
+        Required prominence of peaks (absolute value)
+    distance : int
+        Minimum distance between peaks (in data points)
+    power_threshold : float
+        Minimum power level to include in analysis
+    outliers : list
+        Power levels to exclude from analysis
+    smooth : bool
+        Whether to apply Savitzky-Golay smoothing to the data before peak detection
+    smooth_window : int
+        Window size for Savitzky-Golay smoothing (must be odd)
+    smooth_poly : int
+        Polynomial order for smoothing
+    plot_results : bool
+        Whether to plot the results with marked peaks
+        
+    Returns:
+    --------
+    peak_results : dict
+        Dictionary containing peak positions for each power level
+    summary_df : pandas DataFrame
+        Summary of all peaks found across power levels
+    """
+    import numpy as np
+    import pandas as pd
+    from scipy.signal import find_peaks, savgol_filter
+    import matplotlib.pyplot as plt
+    
+    if outliers is None:
+        outliers = []
+    
+    # Common x values - use the full range
+    x_values = aligned_data['X'].values
+    x_min = np.min(x_values)
+    x_max = np.max(x_values)
+    
+    # Use all data points
+    x_plot = x_values
+    
+    # Dictionary to store results
+    peak_results = {}
+    all_peaks = {}
+    
+    # Create the plot if requested
+    if plot_results:
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 12), gridspec_kw={'height_ratios': [3, 1]})
+        
+    # Process each power level
+    data_columns = [col for col in aligned_data.columns if col != 'X']
+    
+    for col in data_columns:
+        try:
+            power_level = float(col)
+            
+            # Skip if power is below threshold or in outliers
+            if power_level < power_threshold or power_level in outliers:
+                continue
+                
+            # Get y values for the full range
+            y_values = aligned_data[col].values
+            
+            # Skip if there are NaN values
+            if np.isnan(y_values).any():
+                y_values = np.nan_to_num(y_values, nan=np.nanmean(y_values))
+            
+            # Apply smoothing if requested
+            if smooth and len(y_values) > smooth_window:
+                # Ensure window is odd
+                if smooth_window % 2 == 0:
+                    smooth_window += 1
+                y_processed = savgol_filter(y_values, smooth_window, smooth_poly)
+            else:
+                y_processed = y_values
+            
+            # Find peaks - use absolute values, not normalized
+            peaks, properties = find_peaks(y_processed, 
+                                          height=height_threshold, 
+                                          prominence=prominence,
+                                          distance=distance)
+            
+            # Get the actual x positions of the peaks
+            peak_positions = x_plot[peaks]
+            peak_heights = y_processed[peaks]
+            peak_prominences = properties['prominences'] if 'prominences' in properties else np.zeros_like(peaks)
+            
+            # Store results
+            peak_results[power_level] = {
+                'positions': peak_positions,
+                'heights': peak_heights,
+                'prominences': peak_prominences
+            }
+            
+            # Store peaks for histogram
+            for p in peak_positions:
+                all_peaks.setdefault(round(p, 8), []).append(power_level)
+            
+            # Print the results
+            print(f"\nPeaks for Power {power_level:.2f}:")
+            if len(peak_positions) > 0:
+                for i, (pos, height, prom) in enumerate(zip(peak_positions, peak_heights, peak_prominences)):
+                    print(f"  Peak {i+1}: x = {pos:.8f}, height = {height:.4f}, prominence = {prom:.4f}")
+            else:
+                print("  No peaks found with current parameters")
+            
+            # Plot if requested
+            if plot_results:
+                ax1.plot(x_plot, y_processed, label=f'Power {power_level:.2f}')
+                ax1.plot(peak_positions, peak_heights, 'x', markersize=8)
+                
+                for pos, height in zip(peak_positions, peak_heights):
+                    ax1.annotate(f'{pos:.6f}', (pos, height), 
+                                 textcoords="offset points", 
+                                 xytext=(0,10), 
+                                 ha='center',
+                                 fontsize=8)
+                
+        except ValueError as e:
+            print(f"Skipping column {col} - {str(e)}")
+            continue
+    
+    # Create summary DataFrame
+    summary_data = []
+    for peak_pos, powers in all_peaks.items():
+        summary_data.append({
+            'Peak_Position': peak_pos,
+            'Occurrence_Count': len(powers),
+            'Power_Levels': ', '.join([f"{p:.1f}" for p in sorted(powers)])
+        })
+    
+    summary_df = pd.DataFrame(summary_data)
+    if not summary_df.empty:
+        summary_df = summary_df.sort_values('Occurrence_Count', ascending=False)
+    
+    # Finalize the plots
+    if plot_results and not summary_df.empty:
+        # First plot: spectral data with peaks
+        ax1.set_xlabel('X (Aligned)')
+        ax1.set_ylabel('Intensity')
+        ax1.set_title(f'Peak Detection in Spectrum (Full Range)')
+        ax1.grid(True, alpha=0.3)
+        
+        # Add reference lines for alignment peaks if available
+        if 'target_peak1' in aligned_data.attrs and 'target_peak2' in aligned_data.attrs:
+            peak1 = aligned_data.attrs.get('target_peak1')
+            peak2 = aligned_data.attrs.get('target_peak2')
+            
+            ax1.axvline(x=peak1, color='k', linestyle='--', label=f'Ref Peak 1: {peak1:.6f}')
+            ax1.axvline(x=peak2, color='r', linestyle='--', label=f'Ref Peak 2: {peak2:.6f}')
+        
+        ax1.legend(fontsize='small', loc='best')
+        
+        # Second plot: histogram of peak positions
+        peak_positions = summary_df['Peak_Position'].values
+        peak_counts = summary_df['Occurrence_Count'].values
+        
+        ax2.bar(peak_positions, peak_counts, width=(x_max-x_min)/200)
+        ax2.set_xlabel('Peak Position')
+        ax2.set_ylabel('Occurrence Count')
+        ax2.set_title('Peak Position Histogram')
+        ax2.set_xlim(x_min, x_max)
+        #ax2.set_xlim(x_min+0.3*1e10, x_max-0.7*1e10)
+        ax2.grid(True, alpha=0.3)
+        
+        # Add peak position labels
+        for pos, count in zip(peak_positions, peak_counts):
+            ax2.text(pos, count + 0.1, f'{pos:.6f}', ha='center', rotation=90, fontsize=8)
+        
+        plt.tight_layout()
+        plt.show()
+    
+    # Print a summary of all peaks found
+    print("\nSummary of All Detected Peaks (sorted by occurrence):")
+    if not summary_df.empty:
+        print(summary_df.to_string(index=False))
+    else:
+        print("No peaks found with current parameters")
+            
+    return peak_results, summary_df
+
+
+# Find peaks across the full range of aligned data
+peaks, peak_summary = find_peaks_in_spectral_data(
+    aligned_data,
+    height_threshold=0.1,    # Adjust based on your data
+    prominence=0.05,         # Adjust based on your data
+    distance=10,
+    power_threshold=6.0,
+    outliers=None,
+    smooth=True,
+    smooth_window=21,
+    plot_results=True
+)
+
+#%%
+
+"""
+FINDS PEAKS AND PLOTS WITHIN SPECIFIC REGIONS, ISOLATED REGION CONTAINING DESIRED PEAK.
+"""
+
+def plot_spectral_region_with_peaks(aligned_data, peak_results, 
+                                   x_min, x_max, 
+                                   power_threshold=1.0, outliers=None,
+                                   highlight_peak_positions=None, 
+                                   annotate_peaks=True, 
+                                   show_histogram=True):
+    """
+    Plot a specific region of the spectral data with detected peaks.
+    
+    Parameters:
+    -----------
+    aligned_data : pandas DataFrame
+        The aligned data with a common x-axis
+    peak_results : dict
+        Dictionary containing peak positions from find_peaks_in_spectral_data
+    x_min, x_max : float
+        The range of x values to plot
+    power_threshold : float
+        Minimum power level to include in analysis
+    outliers : list
+        Power levels to exclude from analysis
+    highlight_peak_positions : list
+        List of specific peak positions to highlight
+    annotate_peaks : bool
+        Whether to annotate peak positions on the plot
+    show_histogram : bool
+        Whether to show the peak histogram below the main plot
+    
+    Returns:
+    --------
+    fig : matplotlib figure
+        The figure object for further customization if needed
+    """
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    
+    if outliers is None:
+        outliers = []
+    
+    if highlight_peak_positions is None:
+        highlight_peak_positions = []
+    
+    # Common x values
+    x_values = aligned_data['X'].values
+    
+    # Filter data to the region of interest
+    mask = (x_values >= x_min) & (x_values <= x_max)
+    x_plot = x_values[mask]
+    
+    # Count peaks in the region for histogram
+    regional_peaks = {}
+    
+    # Create the plot
+    if show_histogram:
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 12), gridspec_kw={'height_ratios': [3, 1]})
+    else:
+        fig, ax1 = plt.subplots(figsize=(14, 8))
+    
+    # Process each power level
+    data_columns = [col for col in aligned_data.columns if col != 'X']
+    
+    for col in data_columns:
+        try:
+            power_level = float(col)
+            
+            # Skip if power is below threshold or in outliers
+            if power_level < power_threshold or power_level in outliers:
+                continue
+                
+            # Get y values in the specified range
+            y_values = aligned_data[col].values[mask]
+            
+            # Skip if we only have NaN values
+            if np.all(np.isnan(y_values)):
+                continue
+                
+            # Replace NaN with interpolated values
+            if np.any(np.isnan(y_values)):
+                valid_mask = ~np.isnan(y_values)
+                valid_indices = np.where(valid_mask)[0]
+                invalid_indices = np.where(~valid_mask)[0]
+                
+                if len(valid_indices) > 0:
+                    # Fill NaN with nearest valid neighbor
+                    for idx in invalid_indices:
+                        nearest_valid = valid_indices[np.argmin(np.abs(valid_indices - idx))]
+                        y_values[idx] = y_values[nearest_valid]
+            
+            # Plot the data
+            line, = ax1.plot(x_plot, y_values, label=f'Power {power_level:.2f}')
+            line_color = line.get_color()
+            
+            # If this power level has detected peaks, plot them
+            if power_level in peak_results:
+                # Get all peaks for this power level
+                all_peak_positions = peak_results[power_level]['positions']
+                all_peak_heights = peak_results[power_level]['heights']
+                
+                # Filter to peaks in our range
+                range_mask = (all_peak_positions >= x_min) & (all_peak_positions <= x_max)
+                peak_positions = all_peak_positions[range_mask]
+                peak_heights = all_peak_heights[range_mask]
+                
+                # Plot the peaks
+                ax1.plot(peak_positions, peak_heights, 'x', color=line_color, markersize=8)
+                
+                # Annotate peaks if requested
+                if annotate_peaks:
+                    for pos, height in zip(peak_positions, peak_heights):
+                        ax1.annotate(f'{pos:.6f}', (pos, height), 
+                                   textcoords="offset points", 
+                                   xytext=(0,10), 
+                                   ha='center',
+                                   fontsize=8,
+                                   color=line_color)
+                
+                # Store peaks for histogram
+                for pos in peak_positions:
+                    regional_peaks.setdefault(round(pos, 8), []).append(power_level)
+                
+        except ValueError as e:
+            print(f"Skipping column {col} - {str(e)}")
+            continue
+    
+    # Highlight specific peaks if requested
+    for pos in highlight_peak_positions:
+        if x_min <= pos <= x_max:
+            ax1.axvline(x=pos, color='g', linestyle='--', alpha=0.7, 
+                       label=f'Peak: {pos:.6f}')
+    
+    # Add reference lines for alignment peaks
+    if 'target_peak1' in aligned_data.attrs and 'target_peak2' in aligned_data.attrs:
+        peak1 = aligned_data.attrs.get('target_peak1')
+        peak2 = aligned_data.attrs.get('target_peak2')
+        
+        if x_min <= peak1 <= x_max:
+            ax1.axvline(x=peak1, color='k', linestyle='--', 
+                       label=f'Ref Peak 1: {peak1:.6f}')
+        
+        if x_min <= peak2 <= x_max:
+            ax1.axvline(x=peak2, color='r', linestyle='--', 
+                       label=f'Ref Peak 2: {peak2:.6f}')
+    
+    # Finalize main plot
+    ax1.set_xlabel('X (Aligned)')
+    ax1.set_ylabel('Intensity')
+    ax1.set_title(f'Spectral Region ({x_min:.6f} - {x_max:.6f})')
+    ax1.grid(True, alpha=0.3)
+    ax1.legend(fontsize='small', loc='best')
+    
+    # Create histogram if requested
+    if show_histogram and regional_peaks:
+        peak_positions = list(regional_peaks.keys())
+        peak_counts = [len(powers) for powers in regional_peaks.values()]
+        
+        ax2.bar(peak_positions, peak_counts, width=(x_max-x_min)/100, color='skyblue')
+        ax2.set_xlabel('Peak Position')
+        ax2.set_ylabel('Occurrence Count')
+        ax2.set_title('Peak Position Histogram')
+        ax2.set_xlim(x_min, x_max)
+        ax2.grid(True, alpha=0.3)
+        
+        # Add peak position labels
+        for pos, count in zip(peak_positions, peak_counts):
+            ax2.text(pos, count + 0.1, f'{pos:.6f}', ha='center', rotation=90, fontsize=8)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # Print a summary of peaks in this region
+    print(f"\nPeaks in Region ({x_min:.6f} - {x_max:.6f}):")
+    for pos, powers in sorted(regional_peaks.items()):
+        print(f"Position: {pos:.8f}, Occurrences: {len(powers)}, Powers: {', '.join([f'{p:.1f}' for p in sorted(powers)])}")
+    
+    return fig
+
+
+# Then, zoom in on specific regions of interest
+# For example, to focus on the region around your reference peaks:
+# (Replace these with actual values from your data)
+base_freq = 3.84e14  # Your approximate base frequency
+ref_peak1 = aligned_data.attrs.get('target_peak1')
+ref_peak2 = aligned_data.attrs.get('target_peak2')
+
+# Plot region around first reference peak
+plot_spectral_region_with_peaks(
+    aligned_data, 
+    peaks,
+    x_min=ref_peak1 - 0.1e9,  # 0.5 GHz below ref peak 1
+    x_max=ref_peak1 + 0.3e9,  # 0.5 GHz above ref peak 1
+    power_threshold=6.0,
+    outliers=None
+)
+
+#%%
+"""
+SMOOTHING DATA
+"""
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.signal import find_peaks
+from scipy.optimize import curve_fit
+from scipy import stats
+from scipy.signal import savgol_filter
+from scipy.ndimage import gaussian_filter1d
+import re
+
+# First, let's define the smoothing function
+def smooth_data(x_data, y_data, method='gaussian', **kwargs):
+    """
+    Smooth data using various smoothing methods with data-dependent window sizes.
+    
+    Parameters:
+    -----------
+    x_data : array-like
+        X values for the data
+    y_data : array-like
+        Y values to be smoothed
+    method : str
+        Smoothing method: 'savgol' (Savitzky-Golay), 'gaussian', or 'moving_avg'
+    **kwargs : dict
+        Parameters specific to each smoothing method
+        Can include 'window_fraction' to set window size as a fraction of data length
+        
+    Returns:
+    --------
+    smoothed_y : array-like
+        Smoothed Y values
+    """
+    data_length = len(y_data)
+    
+    # Get window fraction (percentage of data length to use for window)
+    window_fraction = kwargs.get('window_fraction', 0.0025)  # Default 5% of data length
+    window_fraction = min(max(window_fraction, 0.00001), 0.5)  # Constrain between 1% and 50%
+    
+    if method == 'savgol':
+        # Calculate window length based on data size
+        window_length = int(data_length * window_fraction)
+        # Ensure window_length is odd
+        if window_length % 2 == 0:
+            window_length += 1
+        # Minimum window of 5 points (or less if data is really small)
+        window_length = max(min(window_length, data_length - 1), 5)
+        if window_length % 2 == 0 and window_length > 0:
+            window_length -= 1
+            
+        polyorder = kwargs.get('polyorder', None)
+        if polyorder is None:
+            # Set polyorder based on window size - typically 2 or 3 works well
+            polyorder = min(3, window_length - 1)
+        polyorder = min(polyorder, window_length - 1)
+        
+        if window_length > 2:  # Minimum required for savgol_filter
+            return savgol_filter(y_data, window_length, polyorder)
+        else:
+            return y_data
+            
+    elif method == 'gaussian':
+        # Calculate sigma based on data size
+        sigma = kwargs.get('sigma', None)
+        if sigma is None:
+            sigma = max(1, data_length * window_fraction / 10)  # Use a smaller divisor for more smoothing
+        return gaussian_filter1d(y_data, sigma)
+        
+    elif method == 'moving_avg':
+        # Calculate window size based on data size
+        window_size = int(data_length * window_fraction)
+        # Ensure at least 3 points for meaningful averaging
+        window_size = max(min(window_size, data_length // 2), 3)
+        
+        if window_size > 1:
+            return np.convolve(y_data, np.ones(window_size)/window_size, mode='same')
+        else:
+            return y_data
+            
+    else:
+        return y_data  # Return original data if method not recognized
+
+# Assuming aligned_data is defined elsewhere
+# For demonstration, if you don't have aligned_data:
+# x_data = np.linspace(8.2e14, 9.3e14, 1000)
+# y_data = np.random.normal(0, 0.03, 1000)  # Simulated noisy data
+
+x_data = aligned_data['X'].values
+y_data = aligned_data['252'].values
+
+# Try more aggressive smoothing to make it visible in plots
+smoothed_y = smooth_data(x_data, y_data, method='gaussian', window_fraction=0.002)
+print(f"Any NaN values: {np.isnan(smoothed_y).any()}")
+print(f"Any infinite values: {np.isinf(smoothed_y).any()}")
+print(f"Raw data range: {np.min(y_data):.4f} to {np.max(y_data):.4f}")
+print(f"Smoothed data range: {np.min(smoothed_y):.4f} to {np.max(smoothed_y):.4f}")
+
+# Create a figure with larger size for better visibility
+plt.figure(figsize=(10, 6))
+
+# Plot raw data with transparency
+plt.plot(x_data, y_data, color='blue', alpha=0.5, label='Raw Data')
+
+# Plot smoothed data with high visibility
+plt.plot(x_data, smoothed_y, color='red', linewidth=2, label='Smoothed Data')
+
+# Add axis labels and title
+plt.xlabel('Frequency (Hz)')
+plt.ylabel('Intensity')
+plt.title('Data with Gaussian Smoothing')
+
+# Set limits to focus on the data
+plt.xlim(min(x_data)+0.1*1e10, max(x_data)-0.2*1e10)
+plt.ylim(-0.1, 1)  # Adjust based on your data range
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+#%%
+"""
+PERFORMING DIRECT ANALYSIS
+"""
+# Function to generate Lorentzian curve with fixed baseline of 0.0
+def lorentzian(x, x0, gamma, amp):
+    """Generate a Lorentzian curve with zero baseline."""
+    return amp * (gamma**2 / ((x - x0)**2 + gamma**2))
+
+# Function to sum multiple Lorentzian curves
+def multi_lorentzian(x, *params):
+    """Sum multiple Lorentzian curves."""
+    y = np.zeros_like(x)
+    for i in range(0, len(params), 3):
+        if i+2 < len(params):  # Ensure we have all parameters
+            x0, gamma, amp = params[i], params[i+1], params[i+2]
+            y += lorentzian(x, x0, gamma, amp)
+    return y
+
+# Function for quadratic fit
+def quadratic_fit(x, a, b, c):
+    """Quadratic function for power broadening fit."""
+    return a*x**2 + b*x + c
+
+# Function for linear fit
+def linear_fit(x, m, b):
+    """Linear function for frequency shift fit."""
+    return m*x + b
+
+# Calculate parameters for Lorentzian from direct FWHM analysis
+def calculate_fwhm_from_data(x_data, y_data, peaks, smoothing=True, 
+                           smooth_method='gaussian', window_fraction=0.01, interpolate=True):
+    """
+    Calculate FWHM directly from the data for each peak.
+    Using fixed baseline of 0.0.
+    """
+    results = []
+    
+    # Apply smoothing if requested
+    if smoothing:
+        y_smooth = smooth_data(x_data, y_data, method=smooth_method, window_fraction=window_fraction)
+    else:
+        y_smooth = y_data.copy()
+    
+    for peak_idx in peaks:
+        peak_x = x_data[peak_idx]
+        peak_y = y_smooth[peak_idx]
+        
+        # Fixed baseline of 0.0
+        baseline = 0.0
+        
+        # Calculate amplitude (peak height above baseline)
+        amplitude = peak_y - baseline
+        
+        # Find half max value (relative to baseline)
+        half_max = baseline + amplitude / 2
+        
+        # Find left and right half-max positions
+        left_idx = right_idx = peak_idx
+        
+        # Search left from peak for half max crossing
+        for i in range(peak_idx, 0, -1):
+            if y_smooth[i] <= half_max:
+                left_idx = i
+                break
+        
+        # Search right from peak for half max crossing
+        for i in range(peak_idx, len(y_smooth)-1):
+            if y_smooth[i] <= half_max:
+                right_idx = i
+                break
+        
+        # Get x positions at half max
+        left_x = x_data[left_idx]
+        right_x = x_data[right_idx]
+        
+        # Interpolate to improve accuracy if requested
+        if interpolate and left_idx > 0 and right_idx < len(y_smooth)-1:
+            # Left half-max interpolation
+            if left_idx < peak_idx and y_smooth[left_idx] != y_smooth[left_idx+1]:
+                t = (half_max - y_smooth[left_idx]) / (y_smooth[left_idx+1] - y_smooth[left_idx])
+                left_x = x_data[left_idx] + t * (x_data[left_idx+1] - x_data[left_idx])
+            
+            # Right half-max interpolation
+            if right_idx > peak_idx and y_smooth[right_idx] != y_smooth[right_idx-1]:
+                t = (half_max - y_smooth[right_idx]) / (y_smooth[right_idx-1] - y_smooth[right_idx])
+                right_x = x_data[right_idx] - t * (x_data[right_idx] - x_data[right_idx-1])
+        
+        # Calculate FWHM
+        fwhm = right_x - left_x
+        
+        # For Lorentzian, gamma = FWHM/2
+        gamma = fwhm / 2
+        
+        results.append({
+            'peak_position': peak_x,
+            'peak_height': peak_y,
+            'left_half_max_pos': left_x,
+            'right_half_max_pos': right_x,
+            'fwhm': fwhm,
+            'gamma': gamma,
+            'amplitude': amplitude
+        })
+    
+    return results
+#%%
+"""
+FITTING THOSE LORENTZIANS
+"""
+def lorentzian(x, x0, gamma, amp, baseline):
+    """Generate a Lorentzian curve with a baseline."""
+    return baseline + amp * (gamma**2 / ((x - x0)**2 + gamma**2))
+
+# Function to sum multiple Lorentzian curves
+def multi_lorentzian(x, *params):
+    """Sum multiple Lorentzian curves."""
+    y = np.zeros_like(x)
+    # Baseline is the last parameter
+    baseline = params[-1] if len(params) % 3 == 1 else 0
+    
+    for i in range(0, len(params) - (len(params) % 3), 3):
+        if i+2 < len(params):  # Ensure we have all parameters
+            x0, gamma, amp = params[i], params[i+1], params[i+2]
+            y += amp * (gamma**2 / ((x - x0)**2 + gamma**2))
+    
+    # Add baseline to the sum of all curves
+    return y + baseline
+
+# Function for quadratic fit
+def quadratic_fit(x, a, b, c):
+    """Quadratic function for power broadening fit."""
+    return a*x**2 + b*x + c
+
+# Function for linear fit
+def linear_fit(x, m, b):
+    """Linear function for frequency shift fit."""
+    return m*x + b
+
+def analyze_power_broadening_aligned_data(aligned_data, smooth_method='gaussian', window_fraction=0.001, baseline_points=50, exclude_columns=None):
+    """
+    Analyze power broadening for aligned data where peaks are already aligned.
+    Fits Lorentzian curves to the data and plots the fits.
+    Now includes baseline calculation, fixed amplitude, and ability to exclude specific columns.
+    
+    Parameters:
+    -----------
+    aligned_data: DataFrame with 'X' column and data columns (named with power values)
+    smooth_method: Smoothing method to use ('gaussian', 'savgol', or 'moving_avg')
+    window_fraction: Fraction of data length to use for smoothing window
+    baseline_points: Number of points at the beginning of the range to use for baseline calculation
+    exclude_columns: List of column names to exclude from analysis but plot as red crosses
+    
+    Returns:
+    --------
+    selected_peak_data: Dictionary with extracted peak information
+    excluded_peak_data: Dictionary with extracted peak information for excluded columns
+    """
+    # Check input data
+    if 'X' not in aligned_data.columns:
+        raise ValueError("Data must have an 'X' column")
+    
+    # Initialize list of columns to exclude if not provided
+    if exclude_columns is None:
+        exclude_columns = []
+    
+    x_data = aligned_data['X'].values
+    
+    # Define frequency range for analysis based on the given limits
+    x_min = min(x_data) + 0.855*1e9
+    x_max = max(x_data) - 1.535*1e9
+    
+    # Get power values from column names
+    power_columns = [col for col in aligned_data.columns if col != 'X']
+    
+    # Extract power values
+    power_values = []
+    for column in power_columns:
+        try:
+            power_match = re.findall(r'(\d+(?:\.\d+)?)', column)
+            if power_match:
+                power_value = float(power_match[0])
+            else:
+                power_value = 0  # Default if not found
+            power_values.append((power_value, column))
+        except:
+            power_values.append((0, column))
+    
+    # Sort by power value
+    power_values.sort()
+    
+    # Store results for analysis
+    selected_peak_data = {
+        'powers': [],
+        'frequencies': [],
+        'amplitudes': [],
+        'fwhms': [],
+        'baselines': []
+    }
+    
+    # Store results for excluded columns
+    excluded_peak_data = {
+        'powers': [],
+        'frequencies': [],
+        'amplitudes': [],
+        'fwhms': [],
+        'baselines': []
+    }
+    
+    # Analyze each power level
+    for power_value, column in power_values:
+        if power_value == 0:
+            continue  # Skip if power value couldn't be extracted
+        
+        # Check if this column should be excluded from analysis
+        is_excluded = any(excl in column for excl in exclude_columns)
+        data_store = excluded_peak_data if is_excluded else selected_peak_data
+            
+        power_str = f"{power_value} microwatts"
+        status_str = "EXCLUDED" if is_excluded else "Analyzing"
+        print(f"\n{'='*80}\n{status_str} {column} ({power_str})")
+        
+        # Get y values
+        y_data = aligned_data[column].values
+        
+        # Apply smoothing
+        y_smooth = smooth_data(x_data, y_data, method=smooth_method, window_fraction=window_fraction)
+        
+        # Find data within the frequency range
+        range_indices = np.where((x_data >= x_min) & (x_data <= x_max))[0]
+        
+        if len(range_indices) > 0:
+            # Get the data within our frequency range
+            x_range = x_data[range_indices]
+            y_range = y_smooth[range_indices]
+            
+            # Calculate baseline from the first baseline_points points in the range
+            baseline = np.mean(y_range[:baseline_points]) if len(y_range) >= baseline_points else 0
+            print(f"Calculated baseline: {baseline:.6f}")
+            
+            # Find the highest peak in the range
+            max_idx = np.argmax(y_range)
+            peak_idx_local = max_idx
+            peak_idx_global = range_indices[max_idx]
+            
+            peak_x = x_range[peak_idx_local]
+            peak_y = y_range[peak_idx_local]
+            
+            # The amplitude is now the maximum value minus the baseline
+            fixed_amplitude = peak_y - baseline
+            print(f"Fixed amplitude: {fixed_amplitude:.6f}")
+            
+            # Calculate FWHM and other parameters directly from data
+            peak_results = calculate_fwhm_from_data(
+                x_data, y_data, [peak_idx_global], 
+                smoothing=True, 
+                smooth_method=smooth_method, 
+                window_fraction=window_fraction
+            )
+            
+            # Initial parameter estimates for Lorentzian fit
+            if peak_results:
+                peak_info = peak_results[0]
+                initial_x0 = peak_info['peak_position']
+                initial_gamma = peak_info['gamma']
+                
+                # Skip fitting for excluded columns, just store the direct measurements
+                if is_excluded:
+                    # Store direct calculation results for excluded columns
+                    data_store['powers'].append(power_value)
+                    data_store['frequencies'].append(peak_x)
+                    data_store['amplitudes'].append(fixed_amplitude)
+                    data_store['fwhms'].append(2 * initial_gamma)
+                    data_store['baselines'].append(baseline)
+                    
+                    print(f"EXCLUDED from analysis: Peak at X = {peak_x:.4e}, FWHM = {2*initial_gamma:.4e}, Baseline = {baseline:.6f}")
+                    
+                    # Plot to visualize the excluded data
+                    plt.figure(figsize=(10, 6))
+                    plt.plot(x_data, y_data, 'r-', alpha=0.3, label='Excluded Raw Data')
+                    plt.plot(x_data, y_smooth, 'darkred', alpha=0.7, label='Excluded Smoothed Data')
+                    
+                    # Highlight the analysis range
+                    plt.axvspan(x_min, x_max, alpha=0.35, color='pink', label='Analysis Range (Excluded)')
+                    
+                    # Plot the calculated baseline
+                    plt.axhline(y=baseline, color='darkred', linestyle='--', alpha=0.7, label=f'Baseline: {baseline:.6f}')
+                    
+                    # Mark the peak with a red X
+                    plt.plot(peak_x, peak_y, 'rx', markersize=12, mew=2, label=f'Excluded Peak')
+                    plt.axvline(x=peak_x, color='r', linestyle=':', alpha=0.5)
+                    
+                    plt.grid(True, alpha=0.3)
+                    plt.xlabel('Frequency (Hz)')
+                    plt.ylabel('Intensity')
+                    plt.title(f'EXCLUDED Data for {power_str}')
+                    plt.legend()
+                    plt.tight_layout()
+                    plt.xlim(min(x_data)+0.75*1e9, max(x_data)-1.5*1e9)
+                    plt.ylim(baseline - 0.1, peak_y + 0.1)
+                    plt.show()
+                    
+                    continue  # Skip to next column
+                
+                # Perform Lorentzian fit on the data in the range for non-excluded columns
+                try:
+                    # Create a denser x grid for smoother curve
+                    x_dense = np.linspace(x_min, x_max, 1000)
+                    
+                    # Define a custom fitting function that fixes the amplitude
+                    def lorentzian_fixed_amp(x, x0, gamma, baseline):
+                        return lorentzian(x, x0, gamma, fixed_amplitude, baseline)
+                    
+                    # Fit Lorentzian with fixed amplitude
+                    popt, pcov = curve_fit(
+                        lorentzian_fixed_amp, 
+                        x_range, 
+                        y_range, 
+                        p0=[initial_x0, initial_gamma, baseline],
+                        maxfev=10000
+                    )
+                    
+                    # Extract fitted parameters
+                    fitted_x0, fitted_gamma, fitted_baseline = popt
+                    fitted_fwhm = 2 * fitted_gamma
+                    
+                    # Calculate fitted curve with fixed amplitude
+                    y_fit = lorentzian(x_dense, fitted_x0, fitted_gamma, fixed_amplitude, fitted_baseline)
+                    
+                    # Store fitted results
+                    data_store['powers'].append(power_value)
+                    data_store['frequencies'].append(fitted_x0)
+                    data_store['amplitudes'].append(fixed_amplitude)
+                    data_store['fwhms'].append(fitted_fwhm)
+                    data_store['baselines'].append(fitted_baseline)
+                    
+                    print(f"Fitted peak at X = {fitted_x0:.4e}, FWHM = {fitted_fwhm:.4e}, Baseline = {fitted_baseline:.6f}")
+                    
+                    # Plot for verification
+                    plt.figure(figsize=(10, 6))
+                    plt.plot(x_data, y_data, 'b-', alpha=0.3, label='Raw Data')
+                    plt.plot(x_data, y_smooth, 'black', alpha=0.7, label='Smoothed Data')
+                    
+                    # Highlight the analysis range
+                    plt.axvspan(x_min, x_max, alpha=0.15, color='indigo', label='Analysis Range')
+                    
+                    # Plot the baseline
+                    plt.axhline(y=fitted_baseline, color='green', linestyle='--', alpha=0.7, label=f'Fitted Baseline: {fitted_baseline:.6f}')
+                    
+                    # Plot the Lorentzian fit
+                    plt.plot(x_dense, y_fit, 'r-', linewidth=2, 
+                            label=f'Lorentzian Fit (FWHM={fitted_fwhm:.4e})')
+                    
+                    # Mark the fitted peak
+                    plt.plot(fitted_x0, fitted_baseline + fixed_amplitude, 'ro', markersize=8)
+                    plt.axvline(x=fitted_x0, color='r', linestyle=':', alpha=0.5)
+                    
+                    # Mark FWHM on the fitted curve
+                    half_max_y = fitted_baseline + fixed_amplitude / 2
+                    left_x = fitted_x0 - fitted_gamma
+                    right_x = fitted_x0 + fitted_gamma
+                    plt.plot([left_x, right_x], [half_max_y, half_max_y], 'r-', linewidth=2)
+                    
+                    plt.grid(True, alpha=0.3)
+                    plt.xlabel('Frequency (Hz)')
+                    plt.ylabel('Intensity')
+                    plt.title(f'Lorentzian Fit for {power_str}')
+                    plt.legend()
+                    plt.tight_layout()
+                    plt.xlim(min(x_data)+0.75*1e9, max(x_data)-1.5*1e9)
+                    plt.ylim(fitted_baseline - 0.1, fitted_baseline + fixed_amplitude + 0.1)
+                    plt.show()
+                
+                except Exception as e:
+                    print(f"Lorentzian fitting failed: {str(e)}")
+                    
+                    # Fall back to direct FWHM calculation from data
+                    peak_x = peak_info['peak_position']
+                    peak_y = peak_info['peak_height']
+                    fwhm = peak_info['fwhm']
+                    amplitude = peak_y - baseline  # Subtract baseline from amplitude
+                    
+                    # Store direct calculation results
+                    data_store['powers'].append(power_value)
+                    data_store['frequencies'].append(peak_x)
+                    data_store['amplitudes'].append(amplitude)
+                    data_store['fwhms'].append(fwhm)
+                    data_store['baselines'].append(baseline)
+                    
+                    print(f"Using direct calculation: Peak at X = {peak_x:.4e}, FWHM = {fwhm:.4e}, Baseline = {baseline:.6f}")
+                    
+                    # Plot for verification (without fit)
+                    plt.figure(figsize=(10, 6))
+                    plt.plot(x_data, y_data, 'b-', alpha=0.3, label='Raw Data')
+                    plt.plot(x_data, y_smooth, 'black', alpha=1.0, label='Smoothed Data')
+                    
+                    # Highlight the analysis range
+                    plt.axvspan(x_min, x_max, alpha=0.2, color='indigo', label='Analysis Range')
+                    
+                    # Plot the calculated baseline
+                    plt.axhline(y=baseline, color='green', linestyle='--', alpha=0.7, label=f'Calculated Baseline: {baseline:.6f}')
+                    
+                    # Mark the selected peak
+                    plt.plot(peak_x, peak_y, 'ro', markersize=8, label=f'Selected Peak')
+                    plt.axvline(x=peak_x, color='r', linestyle=':', alpha=0.5)
+                    
+                    # Mark FWHM
+                    left_x = peak_info['left_half_max_pos']
+                    right_x = peak_info['right_half_max_pos']
+                    half_max_y = baseline + amplitude / 2
+                    plt.plot([left_x, right_x], [half_max_y, half_max_y], 'r-', linewidth=2, 
+                            label=f'FWHM: {fwhm:.4e}')
+                    
+                    plt.grid(True, alpha=0.3)
+                    plt.xlabel('Frequency (Hz)')
+                    plt.ylabel('Intensity')
+                    plt.title(f'Selected Peak for {power_str} (Direct Calculation)')
+                    plt.legend()
+                    plt.tight_layout()
+                    plt.xlim(min(x_data)+0.1*1e10, max(x_data)-0.2*1e10)
+                    plt.ylim(baseline - 0.1, peak_y + 0.1)
+                    plt.show()
+            else:
+                print(f"Could not calculate peak parameters for {power_str}")
+        else:
+            print(f"No data found in the specified frequency range for {power_str}")
+    
+    # Now create summary plots with power broadening and frequency shift fits
+    # But exclude the anomalous points from the fits while showing them in the plot
+    
+    # Power broadening plot
+    plt.figure(figsize=(10, 6))
+    
+    # Plot all included data points
+    plt.scatter(
+        selected_peak_data['powers'], 
+        selected_peak_data['fwhms'],
+        color='blue', marker='o', s=60, label='Included Data'
+    )
+    
+    # Plot excluded data points with red X's
+    if excluded_peak_data['powers']:
+        plt.scatter(
+            excluded_peak_data['powers'], 
+            excluded_peak_data['fwhms'],
+            color='red', marker='x', s=100, linewidth=2, label='Excluded Data'
+        )
+    
+    # Fit quadratic to included data only
+    if len(selected_peak_data['powers']) > 2:
+        power_array = np.array(selected_peak_data['powers'])
+        fwhm_array = np.array(selected_peak_data['fwhms'])
+        
+        try:
+            popt, pcov = curve_fit(quadratic_fit, power_array, fwhm_array)
+            
+            # Create smooth curve for fit
+            power_fit = np.linspace(min(power_array) * 0.8, max(power_array) * 1.2, 100)
+            fwhm_fit = quadratic_fit(power_fit, *popt)
+            
+            # Plot the fit curve
+            plt.plot(power_fit, fwhm_fit, 'g-', linewidth=2, 
+                    label=f'Quadratic Fit: ${popt[0]:.2e}x^2 + {popt[1]:.2e}x + {popt[2]:.2e}$')
+        except Exception as e:
+            print(f"Quadratic fitting failed: {str(e)}")
+    
+    plt.grid(True, alpha=0.3)
+    plt.xlabel('Power (μW)')
+    plt.ylabel('FWHM (Hz)')
+    plt.title('Power Broadening Analysis')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+    
+    # Frequency shift plot
+    plt.figure(figsize=(10, 6))
+    
+    # Plot all included data points
+    plt.scatter(
+        selected_peak_data['powers'], 
+        selected_peak_data['frequencies'],
+        color='blue', marker='o', s=60, label='Included Data'
+    )
+    
+    # Plot excluded data points with red X's
+    if excluded_peak_data['powers']:
+        plt.scatter(
+            excluded_peak_data['powers'], 
+            excluded_peak_data['frequencies'],
+            color='red', marker='x', s=100, linewidth=2, label='Excluded Data'
+        )
+    
+    # Fit linear to included data only
+    if len(selected_peak_data['powers']) > 1:
+        power_array = np.array(selected_peak_data['powers'])
+        freq_array = np.array(selected_peak_data['frequencies'])
+        
+        try:
+            popt, pcov = curve_fit(linear_fit, power_array, freq_array)
+            
+            # Create smooth curve for fit
+            power_fit = np.linspace(min(power_array) * 0.8, max(power_array) * 1.2, 100)
+            freq_fit = linear_fit(power_fit, *popt)
+            
+            # Plot the fit curve
+            plt.plot(power_fit, freq_fit, 'g-', linewidth=2, 
+                    label=f'Linear Fit: ${popt[0]:.2e}x + {popt[1]:.2e}$')
+        except Exception as e:
+            print(f"Linear fitting failed: {str(e)}")
+    
+    plt.grid(True, alpha=0.3)
+    plt.xlabel('Power (μW)')
+    plt.ylabel('Peak Frequency (Hz)')
+    plt.title('Frequency Shift Analysis')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+    
+    return selected_peak_data, excluded_peak_data
+
+#%%
+"""
+FINDING NATURAL LINEWIDTH
+"""
+
+def perform_final_analysis(selected_peak_data):
+    """
+    Perform final analysis on the extracted peak data.
+    
+    Parameters:
+    -----------
+    selected_peak_data: Dictionary with powers, frequencies, fwhms, and amplitudes
+    
+    Returns:
+    --------
+    analysis_results: Dictionary with analysis results
+    """
+    # Convert lists to arrays
+    powers = np.array(selected_peak_data['powers'])
+    frequencies = np.array(selected_peak_data['frequencies'])
+    fwhms = np.array(selected_peak_data['fwhms'])
+    amplitudes = np.array(selected_peak_data['amplitudes'])
+    
+    # Sort by power
+    sort_idx = np.argsort(powers)
+    powers = powers[sort_idx]
+    frequencies = frequencies[sort_idx]
+    fwhms = fwhms[sort_idx]
+    amplitudes = amplitudes[sort_idx]
+    
+    # Calculate FWHM squared for analysis
+    fwhms_squared = fwhms**2
+    
+    # Store results
+    analysis_results = {}
+    
+    # 1. Power Broadening Analysis - Plot FWHM² vs Power
+    plt.figure(figsize=(10, 6))
+    
+    # Try to fit a linear relationship to FWHM² vs Power
+    # FWHM² = a*Power + b, where b = γ₀² (natural linewidth squared)
+    try:
+        popt, pcov = curve_fit(linear_fit, powers, fwhms_squared, p0=[1e13, 7e13])
+        m, b = popt
+        
+        # Calculate fit curve
+        power_fit = np.linspace(0, max(powers)*1.1, 100)
+        fwhm_squared_fit = linear_fit(power_fit, *popt)
+        
+        # Plot data and fit
+        plt.scatter(powers, fwhms_squared, s=80, label='Measured FWHM²')
+        plt.plot(power_fit, fwhm_squared_fit, 'r--', label=f'Linear Fit: FWHM² = {m:.2e}×P + {b:.2e}')
+        
+        # Natural linewidth is the square root of the y-intercept (sqrt(b))
+        natural_linewidth = np.sqrt(b)
+        
+        plt.annotate(f'Natural linewidth² = {b:.4e}',
+                   xy=(0, b),
+                   xytext=(5, b + (max(fwhms_squared) - min(fwhms_squared))*0.4),
+                   arrowprops=dict(arrowstyle="->", connectionstyle="arc3"))
+        
+        print(f"\nPower Broadening Analysis (FWHM² vs Power):")
+        print(f"  Natural linewidth (γ₀) = {natural_linewidth:.4e}")
+        print(f"  Natural linewidth² = {b:.4e}")
+        print(f"  Linear fit parameters: m={m:.4e}, b={b:.4e}")
+        
+        # Store in results
+        analysis_results['natural_linewidth'] = natural_linewidth
+        analysis_results['natural_linewidth_squared'] = b
+        analysis_results['linear_fit_fwhm_squared'] = {'m': m, 'b': b}
+        
+    except Exception as e:
+        print(f"Linear fitting failed: {str(e)}")
+        plt.scatter(powers, fwhms_squared, s=80, label='Measured FWHM²')
+    
+    plt.grid(True, alpha=0.3)
+    plt.xlabel('Power (microwatts)')
+    plt.ylabel('FWHM² (Hz²)')
+    plt.title('Power Broadening Analysis (FWHM² vs Power)')
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig('C:/Users/henry/Documents/LAB D2/PB Analysis FWHM^2.svg', format='svg')
+    plt.show()
+    
+    # Also plot the original FWHM vs Power for visualization
+    plt.figure(figsize=(10, 6))
+    plt.scatter(powers, fwhms, s=80, label='Measured FWHM')
+    
+    # Plot the square root of the fit for comparison
+    if 'natural_linewidth' in analysis_results:
+        natural_linewidth = analysis_results['natural_linewidth']
+        m = analysis_results['linear_fit_fwhm_squared']['m']
+        power_fit = np.linspace(0, max(powers)*1.1, 100)
+        fwhm_fit = np.sqrt(m * power_fit + b)
+        plt.plot(power_fit, fwhm_fit, 'r--', 
+                 label=f'Derived from Linear Fit of FWHM²')
+        
+        plt.annotate(f'Natural linewidth = {natural_linewidth*1e-7:.4f}x$10^7$',
+                   xy=(0, natural_linewidth),
+                   xytext=(5, natural_linewidth + (max(fwhms) - min(fwhms))*0.4),
+                   arrowprops=dict(arrowstyle="->", connectionstyle="arc3"))
+    
+    plt.grid(True, alpha=0.3)
+    plt.xlabel('Power (microwatts)')
+    plt.ylabel('FWHM (Hz)')
+    plt.title('FWHM vs Power with Fit Derived from FWHM² Analysis')
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig('C:/Users/henry/Documents/LAB D2/PB Analysis FWHM.svg', format='svg')
+    plt.show()
+    
+    # 2. Frequency Shift Analysis - Plot Frequency vs Power
+    plt.figure(figsize=(10, 6))
+    
+    # Try linear fit
+    try:
+        popt, pcov = curve_fit(linear_fit, powers, frequencies)
+        m, b = popt
+        
+        # Calculate fit curve
+        power_fit = np.linspace(0, max(powers)*1.1, 100)
+        freq_fit = linear_fit(power_fit, *popt)
+        
+        # Create a color map based on amplitudes for the scatter plot
+        scatter = plt.scatter(powers, frequencies, c=amplitudes, cmap='viridis', 
+                            s=100, alpha=0.7, edgecolors='k')
+        
+        # Add colorbar for amplitudes
+        cbar = plt.colorbar(scatter)
+        cbar.set_label('Peak Amplitude')
+        
+        # Plot fit curve
+        plt.plot(power_fit, freq_fit, 'r--', label=f'Linear Fit: f = {m:.4e}×P + {b:.4e}')
+        
+        # Annotate zero power frequency
+        plt.annotate(f'Zero-power frequency = {b:.4e}',
+                   xy=(0, b),
+                   xytext=(5, b + (max(frequencies) - min(frequencies))*0.25),
+                   arrowprops=dict(arrowstyle="->", connectionstyle="arc3"))
+        
+        print(f"\nFrequency Shift Analysis:")
+        print(f"  Zero-power frequency = {b:.4e}")
+        print(f"  Linear fit parameters: m={m:.4e}, b={b:.4e}")
+        
+        # Store in results
+        analysis_results['zero_power_frequency'] = b
+        analysis_results['frequency_shift'] = {'m': m, 'b': b}
+        
+    except Exception as e:
+        print(f"Linear fitting failed: {str(e)}")
+        scatter = plt.scatter(powers, frequencies, c=amplitudes, cmap='viridis', 
+                            s=100, alpha=0.7, edgecolors='k')
+        cbar = plt.colorbar(scatter)
+        cbar.set_label('Peak Amplitude')
+    
+    # Add data labels
+    for i in range(len(powers)):
+        plt.annotate(f"{powers[i]}",
+                   (powers[i], frequencies[i]),
+                   textcoords="offset points",
+                   xytext=(0, 10),
+                   ha='center')
+    
+    plt.grid(True, alpha=0.3)
+    plt.xlabel('Power (microwatts)')
+    plt.ylabel('Frequency (Hz)')
+    plt.title('Power vs Frequency for Selected Peak')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+    
+    return analysis_results
+
+# Linear fit function for FWHM² vs Power
+def linear_fit(x, m, b):
+    """Linear function: y = m*x + b"""
+    return m*x + b
+
+# Keep the quadratic_fit function in case you need it elsewhere
+def quadratic_fit(x, a, b, c):
+    """Quadratic function: y = a*x^2 + b*x + c"""
+    return a*x**2 + b*x + c
+
+
+"""
+RUNNING ABOVE FUNCTIONS
+"""
+
+# Example usage
+def main():
+    # Assuming aligned_data is already loaded
+    # If not, uncomment the following line and adjust path as needed
+    # aligned_data = pd.read_csv('path_to_aligned_data.csv')
+    
+    # Analyze the aligned data
+    print("Analyzing aligned data...")
+    selected_peak_data, excluded_data = analyze_power_broadening_aligned_data(
+         aligned_data, 
+         exclude_columns=['28','73','125'],window_fraction=0.002)
+    
+    # Perform final analysis if we have enough data points
+    if len(selected_peak_data['powers']) >= 3:
+        print("\nPerforming final analysis...")
+        analysis_results = perform_final_analysis(selected_peak_data)
+        print("\nAnalysis complete!")
+        return analysis_results
+    else:
+        print("\nNot enough data points for analysis. Need at least 3 power levels.")
+        return None
+
+# Run the analysis
+if __name__ == "__main__":
+    analysis_results = main()
+
+#For fully resolved peaks ['9.0','12','18.8','28','125']
+#for nice shape ['28','56','73','125']
+#%%
+
+import traceback
+
+def perform_final_analysis_with_uncertainty(selected_peak_data):
+    """
+    Perform final analysis on extracted peak data with comprehensive uncertainty calculations
+    and weighted linear fitting.
+    
+    Parameters:
+    -----------
+    selected_peak_data: Dictionary with powers, frequencies, fwhms, amplitudes, etc.
+    
+    Returns:
+    --------
+    analysis_results: Dictionary with analysis results including uncertainties
+    """
+    # Convert lists to arrays
+    powers = np.array(selected_peak_data['powers'])
+    frequencies = np.array(selected_peak_data['frequencies'])
+    fwhms = np.array(selected_peak_data['fwhms'])
+    amplitudes = np.array(selected_peak_data['amplitudes'])
+    # Extract gammas (half of FWHM)
+    gammas = fwhms / 2.0
+    
+    # Define uncertainty functions
+    def absolute_uncertainty(A, sigma=0.025):
+        """Calculate amplitude uncertainty based on signal-to-noise ratio"""
+        return sigma * (1 + np.exp(-3 * (A / sigma - 1)))
+    
+    def fwhm_uncertainty_from_noise(gamma, amplitude, noise=0.025, c=1.0):
+        """Calculate FWHM uncertainty from noise and amplitude ratio"""
+        fwhm = 2 * gamma
+        rel_uncertainty = (c * noise) / amplitude
+        return fwhm * rel_uncertainty
+    
+    # Power uncertainty (constant for all points)
+    power_uncertainty = 0.05 * np.ones_like(powers)
+    
+    # Calculate FWHM uncertainties
+    # Assume we have gamma_uncertainties from covariance matrix (in real code, this would come from fitting)
+    # For this example, we'll estimate as 2% of gamma
+    gamma_uncertainties = 0.02 * gammas
+    
+    # Calculate amplitude uncertainties from signal-to-noise ratio
+    amplitude_uncertainties = np.array([absolute_uncertainty(amp) for amp in amplitudes])
+    
+    # Calculate FWHM uncertainties from noise
+    fwhm_noise_uncertainties = np.array([
+        fwhm_uncertainty_from_noise(gamma, amp) 
+        for gamma, amp in zip(gammas, amplitudes)
+    ])
+    
+    # Combine FWHM uncertainties using quadrature sum
+    fwhm_uncertainties = np.sqrt(
+        (2 * gamma_uncertainties)**2 + fwhm_noise_uncertainties**2
+    )
+    
+    # Since we're fitting FWHM^2 vs Power, calculate FWHM^2 uncertainties
+    # If y = x^2, then dy = 2x * dx
+    fwhms_squared = fwhms**2
+    fwhm_squared_uncertainties = 2 * fwhms * fwhm_uncertainties
+    
+    # Sort by power
+    sort_idx = np.argsort(powers)
+    powers = powers[sort_idx]
+    power_uncertainty = power_uncertainty[sort_idx]
+    frequencies = frequencies[sort_idx]
+    fwhms = fwhms[sort_idx]
+    fwhms_squared = fwhms_squared[sort_idx]
+    fwhm_uncertainties = fwhm_uncertainties[sort_idx]
+    fwhm_squared_uncertainties = fwhm_squared_uncertainties[sort_idx]
+    amplitudes = amplitudes[sort_idx]
+    
+    # Store results
+    analysis_results = {}
+    
+    # 1. Power Broadening Analysis - Plot FWHM² vs Power with uncertainties
+    plt.figure(figsize=(10, 6))
+    
+    # Plot data points with error bars
+    plt.errorbar(
+        powers, fwhms_squared, 
+        xerr=power_uncertainty, yerr=fwhm_squared_uncertainties,
+        fmt='o', color='blue', markersize=6, capsize=4, 
+        label='Measured FWHM² with uncertainties'
+    )
+    
+    # Calculate weights for weighted fitting
+    # weights = 1/variance where variance includes both x and y uncertainties
+    # For linear fit y = mx + b, local gradient ≈ m
+    # First make a rough estimate of m for weighting
+    m_estimate = np.polyfit(powers, fwhms_squared, 1)[0]
+    
+    # Total variance for each point: σ²_y + (m * σ_x)²
+    total_variances = fwhm_squared_uncertainties**2 + (m_estimate * power_uncertainty)**2
+    weights = 1.0 / total_variances
+    
+    # Perform weighted linear fit
+    try:
+        # Weighted least squares fit
+        popt, pcov = np.polyfit(powers, fwhms_squared, 1, w=weights, cov=True)
+        m, b = popt
+        
+        # Calculate parameter uncertainty
+        perr = np.sqrt(np.diag(pcov))
+        m_err, b_err = perr
+        
+        # Calculate natural linewidth and its uncertainty
+        natural_linewidth = np.sqrt(b)
+        # Error propagation: if y = sqrt(x), then Δy = 0.5 * Δx / y
+        natural_linewidth_err = 0.5 * b_err / natural_linewidth
+        
+        # Calculate fit curve
+        power_fit = np.linspace(0, max(powers)*1.1, 100)
+        fwhm_squared_fit = linear_fit(power_fit, m, b)
+        
+        # Calculate fit uncertainty band
+        # For a linear model y = mx + b, the variance at any point x is:
+        # var(y) = var(m)*x^2 + var(b) + 2*x*cov(m,b)
+        y_err = np.zeros_like(power_fit)
+        for i, p in enumerate(power_fit):
+            y_err[i] = np.sqrt(p**2 * pcov[0,0] + pcov[1,1] + 2*p*pcov[0,1])
+        
+        # Plot fit curve with uncertainty bands
+        plt.plot(power_fit, fwhm_squared_fit, 'r-', linewidth=2,
+                 label=f'Weighted Linear Fit: FWHM² = ({m:.2e}±{m_err:.2e})×P + ({b:.2e}±{b_err:.2e})')
+        plt.fill_between(power_fit, fwhm_squared_fit - 2*y_err, fwhm_squared_fit + 2*y_err, 
+                         color='r', alpha=0.2, label='1σ Confidence Band')
+        
+        plt.annotate(f'Natural linewidth² = {b:.4e} ± {b_err:.4e} Hz²',
+                   xy=(0, b),
+                   xytext=(5, b + (max(fwhms_squared) - min(fwhms_squared))*0.4),
+                   arrowprops=dict(arrowstyle="->", connectionstyle="arc3"))
+        
+        print(f"\nPower Broadening Analysis (FWHM² vs Power) - Weighted Fit:")
+        print(f"  Natural linewidth (γ₀) = {natural_linewidth:.4e} ± {natural_linewidth_err:.4e} Hz")
+        print(f"  Natural linewidth² = {b:.4e} ± {b_err:.4e} Hz²")
+        print(f"  Linear fit parameters: m = {m:.4e} ± {m_err:.4e}, b = {b:.4e} ± {b_err:.4e}")
+        
+        # Store in results
+        analysis_results['natural_linewidth'] = natural_linewidth
+        analysis_results['natural_linewidth_err'] = natural_linewidth_err
+        analysis_results['natural_linewidth_squared'] = b
+        analysis_results['natural_linewidth_squared_err'] = b_err
+        analysis_results['linear_fit_fwhm_squared'] = {'m': m, 'b': b, 'm_err': m_err, 'b_err': b_err}
+        
+    except Exception as e:
+        print(f"Weighted linear fitting failed: {str(e)}")
+        traceback.print_exc()
+    
+    plt.grid(True, alpha=0.3)
+    plt.xlabel('Power (microwatts)')
+    plt.ylabel('FWHM² (Hz²)')
+    plt.title('Power Broadening Analysis (FWHM² vs Power) with Uncertainties')
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig('PB Analysis FWHM^2 with Uncertainties.svg', format='svg')
+    plt.show()
+    
+    # Also plot the original FWHM vs Power for visualization
+    plt.figure(figsize=(10, 6))
+    
+    # Plot data points with error bars
+    plt.errorbar(
+        powers, fwhms, 
+        xerr=power_uncertainty, yerr=fwhm_uncertainties,
+        fmt='o', color='blue', markersize=6, capsize=4, 
+        label='Measured FWHM with uncertainties'
+    )
+    
+    # Plot the square root of the fit for comparison
+    if 'natural_linewidth' in analysis_results:
+        natural_linewidth = analysis_results['natural_linewidth']
+        natural_linewidth_err = analysis_results['natural_linewidth_err']
+        m = analysis_results['linear_fit_fwhm_squared']['m']
+        m_err = analysis_results['linear_fit_fwhm_squared']['m_err']
+        b = analysis_results['linear_fit_fwhm_squared']['b']
+        b_err = analysis_results['linear_fit_fwhm_squared']['b_err']
+        
+        power_fit = np.linspace(0, max(powers)*1.1, 100)
+        fwhm_fit = np.sqrt(m * power_fit + b)
+        
+        # Calculate uncertainty for FWHM using error propagation
+        # For FWHM = sqrt(m*p + b), we need to propagate errors from m and b
+        fwhm_err = np.zeros_like(power_fit)
+        for i, p in enumerate(power_fit):
+            # Derivative of sqrt(m*p + b) with respect to m is 0.5*p/sqrt(m*p + b)
+            # Derivative of sqrt(m*p + b) with respect to b is 0.5/sqrt(m*p + b)
+            # Using error propagation formula: 
+            # var(f) = (df/dm)^2 * var(m) + (df/db)^2 * var(b) + 2*(df/dm)*(df/db)*cov(m,b)
+            term = np.sqrt(m * p + b)
+            dm_term = 0.5 * p / term
+            db_term = 0.5 / term
+            var_term1 = (dm_term**2) * (m_err**2)
+            var_term2 = (db_term**2) * (b_err**2)
+            cov_term = 2 * dm_term * db_term * pcov[0,1]
+            fwhm_err[i] = np.sqrt(var_term1 + var_term2 + cov_term)
+        
+        plt.plot(power_fit, fwhm_fit, 'r-', linewidth=2,
+                 label=f'Derived from Weighted Linear Fit of FWHM²')
+        plt.fill_between(power_fit, (fwhm_fit - 2*fwhm_err), (fwhm_fit + 2*fwhm_err), 
+                         color='r', alpha=0.2, label='1σ Confidence Band')
+        
+        plt.annotate(f'Natural linewidth = {natural_linewidth*1e-7:.4f} ± {natural_linewidth_err*1e-7:.4f} ×10⁷ Hz',
+                   xy=(0, natural_linewidth),
+                   xytext=(5, natural_linewidth + (max(fwhms) - min(fwhms))*0.4),
+                   arrowprops=dict(arrowstyle="->", connectionstyle="arc3"))
+    
+    plt.grid(True, alpha=0.3)
+    plt.xlabel('Power (microwatts)')
+    plt.ylabel('FWHM (Hz)')
+    plt.title('FWHM vs Power with Uncertainties')
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig('PB Analysis FWHM with Uncertainties.svg', format='svg')
+    plt.show()
+    
+    # 2. Frequency Shift Analysis - Plot Frequency vs Power
+    plt.figure(figsize=(10, 6))
+    
+    # Calculate frequency uncertainties (estimated as 1% of the FWHM)
+    freq_uncertainties = 0.01 * fwhms
+    
+    # Plot data points with error bars
+    plt.errorbar(
+        powers, frequencies, 
+        xerr=power_uncertainty, yerr=freq_uncertainties,
+        fmt='o', color='blue', markersize=6, capsize=4, 
+        label='Measured frequencies with uncertainties'
+    )
+    
+    # Calculate weights for frequency fit
+    # First make a rough estimate of m for weighting
+    m_estimate_freq = np.polyfit(powers, frequencies, 1)[0]
+    
+    # Total variance for each point
+    total_variances_freq = freq_uncertainties**2 + (m_estimate_freq * power_uncertainty)**2
+    weights_freq = 1.0 / total_variances_freq
+    
+    # Try weighted linear fit for frequency shift
+    try:
+        # Weighted least squares fit
+        popt, pcov = np.polyfit(powers, frequencies, 1, w=weights_freq, cov=True)
+        m, b = popt
+        
+        # Calculate parameter uncertainties
+        perr = np.sqrt(np.diag(pcov))
+        m_err, b_err = perr
+        
+        # Calculate fit curve
+        power_fit = np.linspace(0, max(powers)*1.1, 100)
+        freq_fit = linear_fit(power_fit, m, b)
+        
+        # Calculate uncertainty bands
+        y_err = np.zeros_like(power_fit)
+        for i, p in enumerate(power_fit):
+            y_err[i] = np.sqrt(p**2 * pcov[0,0] + pcov[1,1] + 2*p*pcov[0,1])
+        
+        # Create a color map based on amplitudes for the scatter plot
+        norm = plt.Normalize(min(amplitudes), max(amplitudes))
+        colors = plt.cm.viridis(norm(amplitudes))
+        
+        for i in range(len(powers)):
+            plt.scatter(powers[i], frequencies[i], color=colors[i], s=60, edgecolors='k')
+        
+        # Add colorbar for amplitudes
+        sm = plt.cm.ScalarMappable(cmap='viridis', norm=norm)
+        sm.set_array([])
+        cbar = plt.colorbar(sm)
+        cbar.set_label('Peak Amplitude')
+        
+        # Plot fit curve with uncertainty bands
+        plt.plot(power_fit, freq_fit, 'r-', linewidth=2,
+                 label=f'Weighted Linear Fit: f = ({m:.2e}±{m_err:.2e})×P + ({b:.2e}±{b_err:.2e})')
+        plt.fill_between(power_fit, (freq_fit - y_err), (freq_fit + y_err), 
+                         color='r', alpha=0.2, label='1σ Confidence Band')
+        
+        # Annotate zero power frequency
+        plt.annotate(f'Zero-power frequency = {b:.4e} ± {b_err:.4e} Hz',
+                   xy=(0, b),
+                   xytext=(5, b + (max(frequencies) - min(frequencies))*5),
+                   arrowprops=dict(arrowstyle="->", connectionstyle="arc3"))
+        
+        print(f"\nFrequency Shift Analysis (Weighted Fit):")
+        print(f"  Zero-power frequency = {b:.4e} ± {b_err:.4e} Hz")
+        print(f"  Linear fit parameters: m = {m:.4e} ± {m_err:.4e}, b = {b:.4e} ± {b_err:.4e}")
+        
+        # Store in results
+        analysis_results['zero_power_frequency'] = b
+        analysis_results['zero_power_frequency_err'] = b_err
+        analysis_results['frequency_shift'] = {'m': m, 'b': b, 'm_err': m_err, 'b_err': b_err}
+        
+    except Exception as e:
+        print(f"Weighted linear fitting failed for frequency shift: {str(e)}")
+        traceback.print_exc()
+    
+    # Add data labels
+    for i in range(len(powers)):
+        plt.annotate(f"{powers[i]}",
+                   (powers[i], frequencies[i]),
+                   textcoords="offset points",
+                   xytext=(0, 10),
+                   ha='center')
+    
+    plt.grid(True, alpha=0.3)
+    plt.xlabel('Power (microwatts)')
+    plt.ylabel('Frequency (Hz)')
+    plt.title('Power vs Frequency with Uncertainties')
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig('Frequency Shift Analysis with Uncertainties.svg', format='svg')
+    plt.show()
+    
+    return analysis_results
+
+selected_peak_data, excluded_data = analyze_power_broadening_aligned_data(
+     aligned_data, 
+     exclude_columns=[],window_fraction=0.002)
+perform_final_analysis_with_uncertainty(selected_peak_data)
