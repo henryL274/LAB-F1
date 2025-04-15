@@ -1,0 +1,315 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Apr  7 13:13:21 2025
+
+@author: hannanasir
+"""
+
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import curve_fit
+from scipy.signal import find_peaks, savgol_filter
+import math
+import os
+from glob import glob
+
+# ---- Moving Average Function ----
+def moving_average(data, window_size=50):
+    return np.convolve(data, np.ones(window_size) / window_size, mode='same')
+
+# ---- Load Common Data ----
+reference_file = "/Users/hannanasir/Desktop/Laser SPEC/LAB D2/NEW/BROADEST.CSV"
+t_ref, C33, fab = np.loadtxt(reference_file, skiprows=1, delimiter=",", unpack=True)
+
+# ---- Convert Time to Frequency (similar to your first code section) ----
+SPEED_OF_LIGHT = 3.0e8  # m/s
+CAVITY_LENGTH = 0.2  # meters
+FSR = SPEED_OF_LIGHT / (4 * CAVITY_LENGTH)  # Free Spectral Range (Hz)
+f0 = 384000e9  # Approximate starting frequency
+
+# Detect peaks to assign frequencies
+peaks, _ = find_peaks(fab, height=0.5 * np.max(fab), distance=len(t_ref)//100)
+peak_times = t_ref[peaks]
+peak_frequencies = f0 + np.arange(len(peak_times)) * FSR
+
+# Fit frequency vs. time
+def linear_fit(t, a, b):
+    return a * t + b
+
+popt, _ = curve_fit(linear_fit, peak_times, peak_frequencies, 
+                    p0=[FSR / (peak_times[-1] - peak_times[0]), f0])
+a_fit, b_fit = popt
+frequency_fit = linear_fit(t_ref, a_fit, b_fit)  # Convert all time points to frequency
+
+# Convert to GHz and adjust scale
+properf = (frequency_fit / 1e9) - 384000  # Adjusting relative frequency scale
+
+# ---- Process Data for All Magnetic Fields ----
+# Find all MAC1.CSV files in the directory
+data_files = glob("/Users/hannanasir/Desktop/Laser SPEC/LAB D2/NEW/*MAC1.CSV")
+magnetic_fields = []
+
+# Extract the magnetic field values from the filenames
+for file in data_files:
+    try:
+        # Extract filename from path and remove the "MAC1.CSV" part
+        filename = os.path.basename(file)
+        # Try to convert the remaining part to an integer
+        B_value = int(filename.replace("MAC1.CSV", ""))
+        magnetic_fields.append(B_value)
+    except ValueError:
+        # Skip files that don't match the expected pattern
+        continue
+
+# If no fields were found, fall back to the original set
+if not magnetic_fields:
+    magnetic_fields = [0, 12, 24]
+else:
+    # Sort the magnetic fields numerically
+    magnetic_fields.sort()
+
+# EXCLUDE ZERO POINT - Filter out the zero magnetic field value
+magnetic_fields = [B for B in magnetic_fields if B != 0]
+
+print(f"Processing data for magnetic fields: {magnetic_fields}")
+
+background_smooth = {}
+
+for B in magnetic_fields:
+    data_file = f"/Users/hannanasir/Desktop/Laser SPEC/LAB D2/NEW/{B}MAC1.CSV"
+    try:
+        t, C = np.loadtxt(data_file, skiprows=1, delimiter=",", unpack=True)
+        
+        # Background subtraction and smoothing
+        background = C - C33
+        background_smooth[B] = moving_average(background, window_size=50)
+        print(f"Successfully loaded data for B = {B}")
+    except Exception as e:
+        print(f"Error loading data for B = {B}: {e}")
+
+# Define the subset range (adjust these indices based on where your peaks are)
+start_idx = 6000
+end_idx = 17000
+
+# For each magnetic field, we extract the relevant spectrum
+mag_subset = {}
+for B in magnetic_fields:
+    if B in background_smooth:
+        # Make sure we don't exceed array bounds
+        end = min(end_idx, len(background_smooth[B]))
+        mag_subset[B] = background_smooth[B][start_idx:end]
+
+# Extract the corresponding frequency range
+x_subset = properf[start_idx:min(end_idx, len(properf))]
+
+# Define the asymmetric Lorentzian function
+def asymmetric_lorentzian(x, x0, gamma, A, B, asym=0):
+    """
+    Asymmetric Lorentzian function with background offset.
+    
+    Parameters:
+    x0: Center frequency
+    gamma: Width parameter
+    A: Amplitude
+    B: Background offset
+    asym: Asymmetry parameter (0 for symmetric Lorentzian)
+    """
+    # Calculate the standard Lorentzian
+    lorentz = gamma**2 / ((x - x0)**2 + gamma**2)
+    
+    # Add asymmetry factor
+    if asym != 0:
+        # This adds asymmetry by modifying the shape based on which side of center we're on
+        asym_factor = 1 + asym * np.tanh((x - x0) / gamma)
+        return A * lorentz * asym_factor + B
+    else:
+        return A * lorentz + B
+
+# Function to calculate FWHM from fit parameters
+def calculate_fwhm(gamma, asym=0):
+    """Calculate FWHM for an asymmetric Lorentzian with width parameter gamma"""
+    # For small asymmetry, approximation is 2*gamma
+    # For larger asymmetry, we'd need a more complex calculation
+    return 2 * gamma * (1 + 0.2 * abs(asym))  # Approximate correction for asymmetry
+
+# --- Modified analysis loop with uncertainty calculation ---
+peak_results = {}  # Dictionary to store all results
+
+# Target frequency and window settings
+target_freq = 0.615  # Target frequency in GHz
+base_window = 800    # Base window size
+
+for i, B in enumerate(magnetic_fields):
+    if B in mag_subset:
+        # Initial estimate of peak location  
+        initial_pos = np.abs(x_subset - target_freq).argmin()
+        
+        # Define a search window that grows with B field to account for potential shifts
+        search_window = base_window + int(B * 40)  
+        search_left = max(0, initial_pos - search_window)
+        search_right = min(len(x_subset), initial_pos + search_window)
+        
+        # Search data in this window
+        search_x = x_subset[search_left:search_right]
+        search_y = mag_subset[B][search_left:search_right]
+        
+        # Use Savitzky-Golay filter to smooth the data for better peak finding
+        smoothed = savgol_filter(search_y, min(51, len(search_y)-3 if len(search_y) > 3 else 3), 3)
+        
+        # Find the peak in the smoothed data
+        local_peaks, _ = find_peaks(smoothed, prominence=0.01)
+        
+        # If no peaks found, just use the maximum value
+        if len(local_peaks) == 0:
+            local_max_idx = np.argmax(smoothed)
+        else:
+            # Find the peak closest to expected location
+            expected_freq = target_freq + (B * 0.0015)  
+            expected_idx = np.abs(search_x - expected_freq).argmin()
+            
+            # Choose the peak closest to expected position
+            distances = np.abs(local_peaks - (expected_idx - search_left))
+            closest_peak_idx = local_peaks[np.argmin(distances)]
+            local_max_idx = closest_peak_idx
+        
+        # Now define a fitting window around the identified peak
+        peak_position = search_left + local_max_idx
+        fit_window = int(base_window / 1.5)
+        left = max(0, peak_position - fit_window)
+        right = min(len(x_subset), peak_position + fit_window)
+        
+        # Extract data for fitting
+        x_data = x_subset[left:right]
+        y_data = mag_subset[B][left:right]
+        
+        try:
+            # Initial guesses for the asymmetric Lorentzian parameters
+            x0_guess = x_subset[peak_position]
+            gamma_guess = 0.01
+            A_guess = mag_subset[B][peak_position] - np.min(y_data)
+            B_guess = np.min(y_data)
+            asym_guess = 0.1  # Allow for asymmetry
+            
+            p0 = [x0_guess, gamma_guess, A_guess, B_guess, asym_guess]
+            
+            # Set bounds to constrain the fit parameters
+            bounds = (
+                [x0_guess - 0.04, 0.001, 0, -np.inf, -0.9],
+                [x0_guess + 0.04, 0.04, np.inf, np.inf, 0.9]
+            )
+            
+            # Fit asymmetric Lorentzian and get covariance matrix
+            popt, pcov = curve_fit(asymmetric_lorentzian, x_data, y_data, 
+                                   p0=p0, bounds=bounds, maxfev=30000, absolute_sigma=True)
+            
+            # Extract parameters
+            x0, gamma, A, B_val, asym = popt
+            
+            # Extract parameter uncertainties from diagonal of covariance matrix
+            perr = np.sqrt(np.diag(pcov))
+            gamma_uncertainty = perr[1]  # Uncertainty in gamma parameter
+            asym_uncertainty = perr[4]   # Uncertainty in asymmetry parameter
+            
+            # Calculate FWHM
+            fwhm = calculate_fwhm(gamma, asym)
+            
+            # Propagate uncertainties to FWHM
+            d_fwhm_d_gamma = 2 * (1 + 0.2 * abs(asym))
+            d_fwhm_d_asym = 2 * gamma * 0.2 * (1 if asym > 0 else -1 if asym < 0 else 0)
+            
+            fwhm_uncertainty = np.sqrt(
+                (d_fwhm_d_gamma * gamma_uncertainty)**2 + 
+                (d_fwhm_d_asym * asym_uncertainty)**2
+            )
+            
+            # Store results
+            peak_results[B] = {
+                "center": x0,
+                "fwhm": fwhm,
+                "fwhm_uncertainty": fwhm_uncertainty,
+                "gamma": gamma,
+                "gamma_uncertainty": gamma_uncertainty,
+                "amplitude": A,
+                "background": B_val,
+                "asymmetry": asym,
+                "asymmetry_uncertainty": asym_uncertainty,
+                "snr": A/abs(B_val) if B_val != 0 else float('inf')
+            }
+            
+            print(f"\nB = {B} T:")
+            print(f"  Center: {x0:.6f} GHz")
+            print(f"  FWHM: {fwhm:.6f} ± {fwhm_uncertainty:.6f} GHz")
+            print(f"  Asymmetry: {asym:.3f} ± {asym_uncertainty:.3f}")
+            print(f"  SNR: {peak_results[B]['snr']:.2f}")
+            
+        except Exception as e:
+            print(f"Error fitting peak for B = {B}: {e}")
+
+# --- Final plotting with both X and Y error bars ---
+if peak_results:
+    # Sort magnetic fields for plotting
+    sorted_fields = sorted(peak_results.keys())
+    centers = [peak_results[B]["center"] for B in sorted_fields]
+    fwhms = [peak_results[B]["fwhm"] for B in sorted_fields]
+    
+    # Extract the calculated FWHM uncertainties
+    fwhm_errors = [peak_results[B]["fwhm_uncertainty"] for B in sorted_fields]
+    
+    # Convert arbitrary magnetic field units to Tesla
+    scaled_fields = [(B * 12000 * (10**-10) * 4 * math.pi) / 0.05 for B in sorted_fields]
+    scaled_uncertainties = (0.001 * 12000 * (10**-7) * 4 * math.pi) / 0.05  # Systematic x-error
+    
+    # Linear fit to the data
+    def linear(x, m, b):
+        return m * x + b
+    
+    # Fit a line to the data (weighted by uncertainties)
+    popt, pcov = curve_fit(linear, scaled_fields, fwhms, sigma=fwhm_errors, absolute_sigma=True)
+    slope, intercept = popt
+    
+    # Get uncertainty in fit parameters
+    slope_err, intercept_err = np.sqrt(np.diag(pcov))
+    
+    # Generate points for the fitted line
+    x_fit = np.linspace(min(scaled_fields), max(scaled_fields), 100)
+    y_fit = linear(np.array(x_fit), slope, intercept)
+    
+    # Calculate R-squared
+    residuals = np.array(fwhms) - linear(np.array(scaled_fields), slope, intercept)
+    ss_res = np.sum(residuals**2)
+    ss_tot = np.sum((np.array(fwhms) - np.mean(fwhms))**2)
+    r_squared = 1 - (ss_res / ss_tot)
+    
+    # Plot with both X and Y error bars
+    plt.figure(figsize=(10, 6))
+    plt.errorbar(scaled_fields, fwhms, 
+                 xerr=scaled_uncertainties, 
+                 yerr=fwhm_errors,
+                 fmt='o', color='mediumvioletred', 
+                 label='Peak 6 FWHM',
+                 capsize=4)  # Add caps to error bars for better visibility
+    
+    # Plot the line of best fit
+    plt.plot(x_fit, y_fit, color='mediumvioletred', 
+             label=f'Linear Fit: y = ({slope:.4f}±{slope_err:.4f})x + ({intercept:.4f}±{intercept_err:.4f})')
+    
+    # Add labels, grid, and legend
+    plt.xlabel("Magnetic Field (T)", fontsize=14)
+    plt.ylabel("FWHM (GHz)", fontsize=14)
+    plt.tick_params(axis='both', labelsize=14)
+    plt.grid(True)
+    plt.legend(fontsize=14, loc='best')
+    
+    # Add R-squared annotation
+    #plt.annotate(f'R² = {r_squared:.4f}', xy=(0.05, 0.95), xycoords='axes fraction', fontsize=12,
+         #        bbox=dict(boxstyle="round,pad=0.5", facecolor="white", alpha=0.8))
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # Print the fit results
+    print("\nFit Results:")
+    print(f"Slope: {slope:.6f} ± {slope_err:.6f} GHz/T")
+    print(f"Intercept: {intercept:.6f} ± {intercept_err:.6f} GHz")
+    print(f"R-squared: {r_squared:.4f}")
